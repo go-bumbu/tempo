@@ -3,11 +3,13 @@ package tempo_test
 import (
 	"context"
 	"fmt"
+	"github.com/davecgh/go-spew/spew"
 	"net"
-	"time"
-
 	"net/http"
+	"time"
 )
+
+var _ = spew.Dump // keep spew in go mod
 
 type HttpServerRunner struct {
 	Port   int
@@ -85,4 +87,34 @@ func GetFreePort() (port int, err error) {
 		}
 	}
 	return
+}
+
+// ====================================================================================
+//
+
+type SampleTaskRunner struct {
+	Items          []string
+	ProcessedItems []string
+}
+
+func (s *SampleTaskRunner) Run(ctx context.Context) error {
+	for _, item := range s.Items {
+		select {
+		case <-ctx.Done():
+			// clean up shutting down
+			return ctx.Err()
+		default:
+			s.processItem(ctx, item)
+		}
+	}
+	return nil
+}
+
+func (s *SampleTaskRunner) processItem(ctx context.Context, item string) {
+	time.Sleep(1 * time.Second)
+	s.ProcessedItems = append(s.ProcessedItems, item)
+}
+
+func (s *SampleTaskRunner) cleanup(ctx context.Context, item string) {
+
 }

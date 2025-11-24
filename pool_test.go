@@ -3,11 +3,13 @@ package tempo_test
 import (
 	"context"
 	"fmt"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/go-bumbu/tempo"
 	"go.uber.org/goleak"
 	"net/http"
 	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -172,6 +174,35 @@ func testHttpRequest(port int) error {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func TestTaskRunner(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pool := tempo.NewWorkerPool()
+		pool.Start()
+
+		task := SampleTaskRunner{
+			Items: []string{"task1", "task2"},
+		}
+
+		err := pool.EnQueue(&task)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		go func() {
+			// wait before running shutdown, this simulates a signal listener like
+			// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
+			time.Sleep(5 * time.Minute)
+			err = pool.ShutDown()
+			if err != nil {
+				t.Errorf("unable to shut down server: %v", err)
+			}
+		}()
+		pool.Wait()
+
+		spew.Dump(task.ProcessedItems)
+	})
 }
 
 //func TestSomething(t *testing.T) {
