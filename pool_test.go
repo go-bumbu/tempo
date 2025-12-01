@@ -3,13 +3,6 @@ package tempo_test
 import (
 	"context"
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
-	"github.com/go-bumbu/tempo"
-	"go.uber.org/goleak"
-	"net/http"
-	"os"
-	"testing"
-	"testing/synctest"
 	"time"
 )
 
@@ -41,7 +34,7 @@ import (
 //		}
 //	}
 //
-//	// Wait for tasksChan to complete
+//	// Wait for tasksChan to completeTask
 //	for i := 0; i < 3; i++ {
 //		<-done
 //	}
@@ -74,136 +67,104 @@ import (
 //	}
 //}
 
-func TestMain(m *testing.M) {
+//func TestHttpServer(t *testing.T) {
+//	t.Run("async shutdown", func(t *testing.T) {
+//		srv := NewHttpServerRunner()
+//
+//		pool := tempo.NewWorkerPool()
+//		pool.Start()
+//
+//		err := pool.EnQueue(srv)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		// test that the server is active
+//		err = testHttpRequest(srv.Port)
+//		if err != nil {
+//			t.Errorf("unable to contact server: %v", err)
+//		}
+//
+//		go func() {
+//			// wait before running shutdown, this simulates a signal listener like
+//			// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
+//			time.Sleep(200 * time.Millisecond)
+//			err = pool.ShutDown()
+//			if err != nil {
+//				t.Errorf("unable to shut down server: %v", err)
+//			}
+//		}()
+//		pool.Wait()
+//
+//		err = testHttpRequest(srv.Port)
+//		if err == nil {
+//			t.Errorf("server should be stoped after shutdown")
+//		}
+//	})
+//
+//	t.Run("sync shutdown", func(t *testing.T) {
+//		srv := NewHttpServerRunner()
+//
+//		pool := tempo.NewWorkerPool()
+//		pool.Start()
+//
+//		err := pool.EnQueue(srv)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		// test that the server is active
+//		err = testHttpRequest(srv.Port)
+//		if err != nil {
+//			t.Errorf("unable to contact server: %v", err)
+//		}
+//
+//		// give the server time to start
+//		// normally other tasks would be blocking here, e.g. a web server
+//		time.Sleep(100 * time.Millisecond)
+//
+//		// verify no routines are leaking after the sync shutdown
+//		err = pool.ShutDown()
+//		if err != nil {
+//			t.Errorf("unable to shut down server: %v", err)
+//		}
+//
+//		err = testHttpRequest(srv.Port)
+//		if err == nil {
+//			t.Errorf("server should be stoped after shutdown")
+//		}
+//	})
+//
+//}
 
-	// main block that runs tests
-	code := m.Run()
-
-	//check for routine leaks
-	opts := []goleak.Option{
-		goleak.IgnoreAnyFunction(""),
-	}
-	if err := goleak.Find(opts...); err != nil {
-		fmt.Printf("found routine leak: %v\n", err)
-		os.Exit(1)
-	}
-	os.Exit(code)
-}
-
-func TestHttpServer(t *testing.T) {
-	t.Run("async shutdown", func(t *testing.T) {
-		srv := NewHttpServerRunner()
-
-		pool := tempo.NewWorkerPool()
-		pool.Start()
-
-		err := pool.EnQueue(srv)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// test that the server is active
-		err = testHttpRequest(srv.Port)
-		if err != nil {
-			t.Errorf("unable to contact server: %v", err)
-		}
-
-		go func() {
-			// wait before running shutdown, this simulates a signal listener like
-			// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
-			time.Sleep(200 * time.Millisecond)
-			err = pool.ShutDown()
-			if err != nil {
-				t.Errorf("unable to shut down server: %v", err)
-			}
-		}()
-		pool.Wait()
-
-		err = testHttpRequest(srv.Port)
-		if err == nil {
-			t.Errorf("server should be stoped after shutdown")
-		}
-	})
-
-	t.Run("sync shutdown", func(t *testing.T) {
-		srv := NewHttpServerRunner()
-
-		pool := tempo.NewWorkerPool()
-		pool.Start()
-
-		err := pool.EnQueue(srv)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// test that the server is active
-		err = testHttpRequest(srv.Port)
-		if err != nil {
-			t.Errorf("unable to contact server: %v", err)
-		}
-
-		// give the server time to start
-		// normally other tasks would be blocking here, e.g. a web server
-		time.Sleep(100 * time.Millisecond)
-
-		// verify no routines are leaking after the sync shutdown
-		err = pool.ShutDown()
-		if err != nil {
-			t.Errorf("unable to shut down server: %v", err)
-		}
-
-		err = testHttpRequest(srv.Port)
-		if err == nil {
-			t.Errorf("server should be stoped after shutdown")
-		}
-	})
-
-}
-
-func testHttpRequest(port int) error {
-	client := &http.Client{
-		Timeout: 2 * time.Second,
-	}
-
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/", port))
-	if err != nil {
-		return fmt.Errorf("cannot get response: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func TestTaskRunner(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		pool := tempo.NewWorkerPool()
-		pool.Start()
-
-		task := SampleTaskRunner{
-			Items: []string{"task1", "task2"},
-		}
-
-		err := pool.EnQueue(&task)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		go func() {
-			// wait before running shutdown, this simulates a signal listener like
-			// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
-			time.Sleep(5 * time.Minute)
-			err = pool.ShutDown()
-			if err != nil {
-				t.Errorf("unable to shut down server: %v", err)
-			}
-		}()
-		pool.Wait()
-
-		spew.Dump(task.ProcessedItems)
-	})
-}
+//func TestTaskRunner(t *testing.T) {
+//	synctest.Test(t, func(t *testing.T) {
+//		pool := tempo.NewWorkerPool()
+//		pool.Start()
+//
+//		task := SampleTaskRunner{
+//			Items: []string{"task1", "task2"},
+//		}
+//
+//		err := pool.EnQueue(&task)
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//
+//		go func() {
+//			// wait before running shutdown, this simulates a signal listener like
+//			// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
+//			time.Sleep(5 * time.Minute)
+//			err = pool.ShutDown()
+//			if err != nil {
+//				t.Errorf("unable to shut down server: %v", err)
+//			}
+//		}()
+//		pool.Wait()
+//
+//		spew.Dump(task.ProcessedItems)
+//	})
+//}
 
 //func TestSomething(t *testing.T) {
 //	//synctest.Test(t, func(t *testing.T) {

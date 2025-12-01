@@ -2,17 +2,15 @@ package tempo
 
 import (
 	"context"
-	"fmt"
-	"github.com/robfig/cron/v3"
 	"sync"
 	"time"
 )
 
-type Task struct {
-	ID      int
-	Message string
-	Run     func() // the actual work
-}
+//type Task struct {
+//	ID      int
+//	Message string
+//	Run     func() // the actual work
+//}
 
 type JobHandler interface {
 	Run(ctx context.Context) error
@@ -85,24 +83,24 @@ func New(opts ...Option) *Runner {
 
 // Start begins job scheduling.
 func (tr *Runner) Start() {
-
-	for i := 1; i <= workers; i++ {
-		tr.wg.Add(1)
-		go tr.worker(i)
-	}
-
-	for _, job := range r.jobs {
-		r.wg.Add(1)
-		go r.runJob(job)
-	}
+	//
+	//for i := 1; i <= workers; i++ {
+	//	tr.wg.Add(1)
+	//	go tr.worker(i)
+	//}
+	//
+	//for _, job := range r.jobs {
+	//	r.wg.Add(1)
+	//	go r.runJob(job)
+	//}
 }
 
 func (tr *Runner) worker(id int) {
-	defer tr.wg.Done()
-	for task := range tr.tasks {
-		fmt.Printf("Worker %d executing task %d: %s\n", id, task.ID, task.Message)
-		task.Run() // execute the actual task
-	}
+	//defer tr.wg.Done()
+	//for task := range tr.tasks {
+	//	fmt.Printf("Worker %d executing task %d: %s\n", id, task.ID, task.Message)
+	//	task.Run() // execute the actual task
+	//}
 }
 
 // Stop closes the task channel and waits for workers to finish
@@ -115,13 +113,13 @@ func (tr *Runner) Stop() {
 
 }
 
-func (tr *Runner) worker(id int) {
-	defer tr.wg.Done()
-	for task := range tr.tasks {
-		fmt.Printf("Worker %d executing task %d: %s\n", id, task.ID, task.Message)
-		task.Run() // execute the actual task
-	}
-}
+//func (tr *Runner) worker(id int) {
+//	defer tr.wg.Done()
+//	for task := range tr.tasks {
+//		fmt.Printf("Worker %d executing task %d: %s\n", id, task.ID, task.Message)
+//		task.Run() // execute the actual task
+//	}
+//}
 
 // OneShot enqueues a task for execution
 func (tr *Runner) OneShot(task Task) {
@@ -129,15 +127,15 @@ func (tr *Runner) OneShot(task Task) {
 }
 
 func (tr *Runner) Schedule(task Task, cronStr string) {
-	c := cron.New(cron.WithSeconds()) // support seconds if needed
-
-	// Run every day at 08:00
-	c.AddFunc(cronStr, func() {
-		tr.OneShot(task)
-	})
-
-	c.Start()
-	defer c.Stop()
+	//c := cron.New(cron.WithSeconds()) // support seconds if needed
+	//
+	//// Run every day at 08:00
+	//c.AddFunc(cronStr, func() {
+	//	tr.OneShot(task)
+	//})
+	//
+	//c.Start()
+	//defer c.Stop()
 }
 
 // Interval will run the task continuously with a pause in between of pause duration

@@ -89,8 +89,6 @@ func (p *WorkerPool) Wait() {
 	<-p.stopChan
 }
 
-var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")
-
 // ShutDown gracefully cancels the context, stopping all poolSize
 func (p *WorkerPool) ShutDown() error {
 

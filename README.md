@@ -3,9 +3,10 @@
 Tempos is a background job scheduling and control library
 
 features
- * cron-like task triggering
- * limit parallel execution
- * optional status reporting
+ * schedule task to be executed as soon as possible, regularly or any time in the future 
+ * limit parallel execution of tasks
+ * task status can be queried, running and pending tasks can be canceled.
+ * clean shutdown
 
 
 ## Braindump
