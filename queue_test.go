@@ -38,7 +38,7 @@ func TestQueueParallelism(t *testing.T) {
 
 	t.Run("run tasks sequentially with parallelism 1", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			q := tempo.NewQueue(1, 10)
+			q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 1, QueueSize: 10})
 			q.Start()
 
 			var result []string
@@ -75,7 +75,7 @@ func TestQueueParallelism(t *testing.T) {
 
 	t.Run("run all tasks with parallelism 3", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			q := tempo.NewQueue(3, 20)
+			q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 3, QueueSize: 20})
 			q.Start()
 
 			var result []string
@@ -119,7 +119,7 @@ func TestQueueParallelism(t *testing.T) {
 
 func TestQueueLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		q := tempo.NewQueue(3, 5)
+		q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 3, QueueSize: 5})
 		q.Start()
 
 		// fill queue up to capacity (3 running + 5 waiting)
@@ -156,7 +156,7 @@ func TestQueueLimit(t *testing.T) {
 func TestShutdown(t *testing.T) {
 	t.Run("clean shutdown, wait for tasks to finish", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			q := tempo.NewQueue(2, 10)
+			q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 10})
 			q.Start()
 
 			result := []string{}
@@ -206,7 +206,7 @@ func TestShutdown(t *testing.T) {
 
 	t.Run("unclean shutdown tasks exceed timeout", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			q := tempo.NewQueue(2, 10)
+			q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 10})
 			q.Start()
 
 			result := []string{}
@@ -258,7 +258,7 @@ func TestShutdown(t *testing.T) {
 
 func TestQueueListJobs(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		q := tempo.NewQueue(2, 20)
+		q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 20})
 		q.Start()
 
 		// add 3 jobs
@@ -301,7 +301,7 @@ func TestQueueListJobs(t *testing.T) {
 
 func TestQueueCatchPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		q := tempo.NewQueue(2, 20)
+		q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 20})
 		q.Start()
 
 		// add 3 jobs
@@ -329,9 +329,9 @@ func TestQueueCatchPanic(t *testing.T) {
 	})
 }
 
-func getJobStatus(in tempo.QueueInfo) []string {
+func getJobStatus(in []tempo.QueueTaskInfo) []string {
 	r := []string{}
-	for _, item := range in.Tasks {
+	for _, item := range in {
 		r = append(r, string(item.Status))
 	}
 	return r

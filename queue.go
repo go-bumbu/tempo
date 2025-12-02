@@ -10,12 +10,12 @@ import (
 
 type Queue struct {
 	maxParallelism int           // Max concurrent tasks for this queue
-	queueSize      int           // Max total tasks (waiting + running)
+	queueSize      int           // Max total tasks waiting
+	historySize    int           // amount of tasks to keep in completed
 	tasks          []*QueuedTask // All tasks (waiting + running)
 	lock           sync.Mutex
 
 	// runtime context
-
 	workerGroup    sync.WaitGroup
 	scheduleNotify chan struct{} // Notification channel for scheduler wake-up
 
@@ -26,31 +26,29 @@ type Queue struct {
 	stopChan chan struct{}
 }
 
-// QueuedTask wraps a task with metadata
-type QueuedTask struct {
-	ID        uuid.UUID                 // Unique identifier for the task
-	Task      func(ctx context.Context) // The actual task (for simple functions)
-	Status    TaskStatus                // Current status
-	QueuedAt  time.Time                 // When it was added to queue
-	StartedAt time.Time                 // When it started running
-}
-
 // TaskStatus represents the current state of a task
 type TaskStatus string
 
 const (
-	TaskStatusWaiting  TaskStatus = "waiting"
-	TaskStatusRunning  TaskStatus = "running"
-	TaskStatusComplete TaskStatus = "completed"
+	defaultMaxParallel = 1
+	defaultQueueSize   = 0
+	defaultHistory     = 10
 )
 
-func NewQueue(parallel, size int) *Queue {
+type QueueCfg struct {
+	QueueSize      int
+	MaxParallelism int
+	HistorySize    int
+}
+
+func NewQueue(cfg QueueCfg) *Queue {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Queue{
-		maxParallelism: parallel,
-		queueSize:      size,
+	q := &Queue{
+		maxParallelism: defaultMaxParallel,
+		queueSize:      defaultQueueSize,
+		historySize:    defaultHistory,
 		tasks:          []*QueuedTask{},
 		lock:           sync.Mutex{},
 
@@ -62,6 +60,18 @@ func NewQueue(parallel, size int) *Queue {
 		stopOnce: sync.Once{},
 		stopChan: make(chan struct{}),
 	}
+
+	if cfg.MaxParallelism > 0 {
+		q.maxParallelism = cfg.MaxParallelism
+	}
+	if cfg.QueueSize > 0 {
+		q.queueSize = cfg.QueueSize
+	}
+	if cfg.HistorySize > 0 {
+		q.historySize = cfg.HistorySize
+	}
+
+	return q
 }
 
 func (q *Queue) Start() {
@@ -78,6 +88,21 @@ func (q *Queue) taskScheduler() {
 			q.tryRun()
 		}
 	}
+}
+
+const (
+	TaskStatusWaiting  TaskStatus = "waiting"
+	TaskStatusRunning  TaskStatus = "running"
+	TaskStatusComplete TaskStatus = "completed"
+)
+
+// QueuedTask wraps a task with metadata
+type QueuedTask struct {
+	ID        uuid.UUID                 // Unique identifier for the task
+	Task      func(ctx context.Context) // The actual task (for simple functions)
+	Status    TaskStatus                // Current status
+	QueuedAt  time.Time                 // When it was added to queue
+	StartedAt time.Time                 // When it started running
 }
 
 func (q *Queue) tryRun() {
@@ -187,11 +212,14 @@ func (q *Queue) ShutDown(ctx context.Context) error {
 	return err
 }
 
+var ErrQueueFull = errors.New("queue full")
+
 func (q *Queue) Add(task func(ctx context.Context)) (uuid.UUID, error) {
 	q.lock.Lock()
 	waiting := q.countByStatusUnsafe(TaskStatusWaiting)
+	running := q.countByStatusUnsafe(TaskStatusRunning)
 
-	if waiting >= q.queueSize {
+	if (waiting + running) >= (q.queueSize + q.maxParallelism) {
 		q.lock.Unlock()
 		return uuid.UUID{}, ErrQueueFull
 	}
@@ -218,20 +246,12 @@ type QueueTaskInfo struct {
 	QueuedAt  time.Time
 	StartedAt time.Time
 }
-type QueueInfo struct {
-	PoolSize  int
-	QueueSize int
-	Tasks     []QueueTaskInfo // every task should have status like running and queued datetime
-}
 
-func (q *Queue) List() QueueInfo {
+func (q *Queue) List() []QueueTaskInfo {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
-	info := QueueInfo{
-		PoolSize:  q.maxParallelism,
-		QueueSize: q.queueSize,
-	}
+	var info []QueueTaskInfo
 
 	for _, task := range q.tasks {
 		qt := QueueTaskInfo{
@@ -240,7 +260,7 @@ func (q *Queue) List() QueueInfo {
 			QueuedAt:  task.QueuedAt,
 			StartedAt: task.StartedAt,
 		}
-		info.Tasks = append(info.Tasks, qt)
+		info = append(info, qt)
 	}
 	return info
 }

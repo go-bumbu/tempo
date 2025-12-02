@@ -9,11 +9,8 @@ default: help
 test: ## run fast go tests
 	@go test ./...
 
-test-full: ## run go full tests (uses test containers)
-	@go test ./... -alldbs
-
-test-race: ## run go full tests with race test (uses test containers)
-	@go test ./... -race -count 2
+test-race: ## run go full tests with race test
+	@go test ./... -race -count 6
 
 lint: ## run go linter
 	@# depends on https://github.com/golangci/golangci-lint
