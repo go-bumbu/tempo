@@ -24,7 +24,7 @@ benchmark: ## run go benchmarks
 	@go test -run=^$$ -bench=. ./...
 
 .PHONY: verify
-verify: lint test-full license-check benchmark coverage ## run all tests
+verify: lint test-race license-check benchmark coverage ## run all tests
 
 # Default coverage threshold is 80
 COVERAGE_THRESHOLD ?= 80

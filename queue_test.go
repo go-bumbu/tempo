@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -42,9 +43,12 @@ func TestQueueParallelism(t *testing.T) {
 			q.Start()
 
 			var result []string
+			lock := sync.Mutex{}
 			for i := 1; i <= 4; i++ {
 				_, err := q.Add(func(ctx context.Context) {
+					lock.Lock()
 					result = append(result, strconv.Itoa(i))
+					lock.Unlock()
 					time.Sleep(10 * time.Minute)
 
 				})
@@ -79,9 +83,12 @@ func TestQueueParallelism(t *testing.T) {
 			q.Start()
 
 			var result []string
+			lock := sync.Mutex{}
 			for i := 1; i <= 12; i++ {
 				_, err := q.Add(func(ctx context.Context) {
+					lock.Lock()
 					result = append(result, strconv.Itoa(i))
+					lock.Unlock()
 					time.Sleep(10 * time.Minute)
 				})
 				if err != nil {
@@ -159,19 +166,23 @@ func TestShutdown(t *testing.T) {
 			q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 10})
 			q.Start()
 
-			result := []string{}
-
+			var result []string
+			lock := sync.Mutex{}
 			for i := 1; i <= 2; i++ {
 				_, err := q.Add(func(ctx context.Context) {
 					select {
 					case <-time.After(10 * time.Minute):
+						lock.Lock()
 						result = append(result, strconv.Itoa(i))
+						lock.Unlock()
 						// finished normally
 						return
 					case <-ctx.Done():
 						// still take some time for shutdown
 						time.Sleep(1 * time.Minute)
+						lock.Lock()
 						result = append(result, strconv.Itoa(i))
+						lock.Unlock()
 						return
 					}
 				})
@@ -209,19 +220,24 @@ func TestShutdown(t *testing.T) {
 			q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 10})
 			q.Start()
 
-			result := []string{}
-
+			var result []string
+			lock := sync.Mutex{}
+			// create 2 tasks that will not finish during the shutdown
 			for i := 1; i <= 2; i++ {
 				_, err := q.Add(func(ctx context.Context) {
 					select {
 					case <-time.After(10 * time.Minute):
+						lock.Lock()
 						result = append(result, strconv.Itoa(i))
+						lock.Unlock()
 						// finished normally
 						return
 					case <-ctx.Done():
 						// still take some time for shutdown
 						time.Sleep(5 * time.Minute)
+						lock.Lock()
 						result = append(result, strconv.Itoa(i))
+						lock.Unlock()
 						return
 					}
 				})
@@ -243,10 +259,12 @@ func TestShutdown(t *testing.T) {
 			}
 
 			// verify work after shutdown, expect empty result
-			want := []string{}
+			var want []string
+			lock.Lock()
 			if diff := cmp.Diff(result, want); diff != "" {
 				t.Errorf("unexpected value (-got +want)\n%s", diff)
 			}
+			lock.Unlock()
 
 			// white some longer until the shutdown actually exits the routines
 			// since in this scenario we expect routines to leak, with the extra waiting time

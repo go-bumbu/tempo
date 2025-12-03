@@ -190,8 +190,7 @@ func (q *Queue) ShutDown(ctx context.Context) error {
 	var err error
 
 	q.stopOnce.Do(func() {
-		q.cancel()              // notify running jobs to stop
-		close(q.scheduleNotify) // Close notification channel to stop scheduler
+		q.cancel() // notify running jobs to stop
 
 		shutdownCh := make(chan struct{})
 		go func() {
