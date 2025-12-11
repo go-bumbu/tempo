@@ -17,8 +17,9 @@ lint: ## run go linter
 	@golangci-lint run
 
 license-check: ## check for invalid licenses
-	@# depends on : https://github.com/elastic/go-licence-detector
-	@go list -m -mod=readonly  -json all  | go-licence-detector -includeIndirect -validate -rules allowedLicenses.json
+	# Check licenses, depends on https://github.com/elastic/go-licence-detector
+	@go list -m -mod=readonly  -json all  | go-licence-detector -includeIndirect -rules allowedLicenses.json \
+	-overrides overrideLicenses.json
 
 benchmark: ## run go benchmarks
 	@go test -run=^$$ -bench=. ./...

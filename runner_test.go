@@ -105,11 +105,20 @@ func TestRunnerParallelism(t *testing.T) {
 
 func TestRunnerLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 3, QueueSize: 5})
+		r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 1, QueueSize: 5})
 		r.StartBg()
 
+		// put one task into running
+		_, err := r.Add(func(ctx context.Context) {
+			time.Sleep(10 * time.Minute)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// let it schedule
+		time.Sleep(100 * time.Millisecond)
+
 		// fill queue up to capacity
-		// TODO ensure the test actually covers the expectation
 		for i := 1; i <= 5; i++ {
 			_, err := r.Add(func(ctx context.Context) {
 				time.Sleep(10 * time.Minute)
@@ -119,7 +128,8 @@ func TestRunnerLimit(t *testing.T) {
 			}
 		}
 
-		_, err := r.Add(func(ctx context.Context) {
+		// expect que full error
+		_, err = r.Add(func(ctx context.Context) {
 			time.Sleep(10 * time.Minute)
 		})
 

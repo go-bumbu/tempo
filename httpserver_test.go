@@ -84,8 +84,9 @@ func httpServer(ctx context.Context, port int) error {
 		Addr: fmt.Sprintf(":%d", port),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "Hello from port %d\n", port)
+			_, _ = fmt.Fprintf(w, "Hello from port %d\n", port)
 		}),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	// StartBg server in goroutine
@@ -133,7 +134,9 @@ func GetFreePort() (port int, err error) {
 	if a, err = net.ResolveTCPAddr("tcp", "localhost:0"); err == nil {
 		var l *net.TCPListener
 		if l, err = net.ListenTCP("tcp", a); err == nil {
-			defer l.Close()
+			defer func() {
+				_ = l.Close()
+			}()
 			return l.Addr().(*net.TCPAddr).Port, nil
 		}
 	}
@@ -149,7 +152,9 @@ func testHttpRequest(port int) error {
 	if err != nil {
 		return fmt.Errorf("cannot get response: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}

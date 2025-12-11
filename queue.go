@@ -45,6 +45,8 @@ const (
 	TaskStatusWaiting TaskStatus = iota
 	TaskStatusRunning
 	TaskStatusComplete
+	TaskStatusFailed
+	TaskStatusCanceled
 )
 
 func (s TaskStatus) Str() string {
@@ -55,6 +57,10 @@ func (s TaskStatus) Str() string {
 		return "running"
 	case TaskStatusComplete:
 		return "complete"
+	case TaskStatusFailed:
+		return "failed"
+	case TaskStatusCanceled:
+		return "canceled"
 	default:
 		return "unknown"
 	}
@@ -119,7 +125,7 @@ func (q *Queue) HasWaiting() bool {
 }
 
 func (q *Queue) hasWaitingUnsafe() bool {
-	for i, _ := range q.tasks {
+	for i := range q.tasks {
 		if q.tasks[i].Status == TaskStatusWaiting {
 			return true
 		}
@@ -130,13 +136,12 @@ func (q *Queue) hasWaitingUnsafe() bool {
 func (q *Queue) SetStatus(id uuid.UUID, status TaskStatus) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for i, _ := range q.tasks {
+	for i := range q.tasks {
 		if q.tasks[i].ID == id {
 			q.tasks[i].Status = status
 			return
 		}
 	}
-	return
 }
 
 func (q *Queue) CountStatus(status TaskStatus) int {
@@ -147,7 +152,7 @@ func (q *Queue) CountStatus(status TaskStatus) int {
 
 func (q *Queue) countUnsafe(status TaskStatus) int {
 	n := 0
-	for i, _ := range q.tasks {
+	for i := range q.tasks {
 		if q.tasks[i].Status == status {
 			n++
 		}
@@ -199,7 +204,7 @@ func (q *Queue) WaitForTask(ctx context.Context) error {
 func (q *Queue) StartTask() (*QueuedTask, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for i, _ := range q.tasks {
+	for i := range q.tasks {
 		if q.tasks[i].Status == TaskStatusWaiting {
 			q.tasks[i].Status = TaskStatusRunning
 			return q.tasks[i], nil
@@ -214,8 +219,4 @@ func (q *Queue) Unlock() {
 
 func (q *Queue) UnlockAll() {
 	q.cond.Broadcast()
-}
-
-func (q *Queue) Cancel() {
-	panic("not implemented")
 }

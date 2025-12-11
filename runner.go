@@ -3,7 +3,6 @@ package tempo
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	"sync"
@@ -41,8 +40,6 @@ func NewQueueRunner(cfg QueueCfg) *QueueRunner {
 // StartBg begins processing tasks
 func (r *QueueRunner) StartBg() {
 
-	//tasksCh := make(chan struct{}, r.queue.maxRunning)
-
 	r.wg.Go(func() {
 		<-r.ctx.Done()
 		// Wake up waiting workers to shutdown
@@ -53,13 +50,11 @@ func (r *QueueRunner) StartBg() {
 	for i := 0; i < r.queue.maxRunning; i++ {
 		r.wg.Go(func() {
 			for {
-				// Atomically wait and claim
 				task, err := r.queue.WaitAndClaimTask(r.ctx)
 				if err != nil {
 					return // Shutdown
 				}
 
-				// Execute with panic recovery
 				func() {
 					defer func() {
 						if v := recover(); v != nil {
@@ -73,77 +68,6 @@ func (r *QueueRunner) StartBg() {
 					}()
 					task.Task(r.ctx)
 					r.queue.SetStatus(task.ID, TaskStatusComplete)
-				}()
-			}
-		})
-	}
-}
-
-// StartBg begins processing tasks
-func (r *QueueRunner) StartBg2() {
-
-	tasksCh := make(chan struct{}, r.queue.maxRunning)
-
-	r.wg.Go(func() {
-		<-r.ctx.Done()
-		// Wake up waitForTask() for the last time during shutdown
-		r.queue.Unlock()
-	})
-
-	// Fixed worker pool - each worker loops forever
-
-	// main control loop
-	r.wg.Go(func() {
-		defer close(tasksCh)
-
-		for {
-			err := r.queue.WaitForTask(r.ctx)
-			if err != nil {
-				return
-			}
-
-			select {
-			case tasksCh <- struct{}{}:
-				// Task sent, wait for the next one.
-			case <-r.ctx.Done():
-				return
-			}
-		}
-	})
-
-	// workers
-	for range r.queue.maxRunning { // read from queue?
-		r.wg.Go(func() {
-			for range tasksCh {
-				func() {
-					defer func() {
-						// If the task panics, record the panic as an error.
-						if v := recover(); v != nil {
-							spew.Dump(v)
-							// todo handle error
-							//task.data.err = fmt.Errorf("panic: %v", v)
-						}
-						// Drop the reference to the function, so it can be GC'ed.
-						// task.data.f = nil
-						// Close the task "done" channel, so Wait() unblocks.
-						//close(task.data.done)
-					}()
-
-					task, err := r.queue.StartTask()
-					if err != nil {
-						// Another worker got the task first (race condition) and there is no task to run
-						// for now This is the best way to handle it - just continue to next signal
-						// if you have a better idea please contribute
-						if errors.Is(err, ErrTaskNotFound) {
-							return
-						}
-						// this should never panic since StartTask() only returns one error
-						panic(fmt.Errorf("failed to start task: %w", err))
-					}
-
-					// todo get error
-					task.Task(r.ctx)
-					r.queue.SetStatus(task.ID, TaskStatusComplete) // todo status failed ?
 				}()
 			}
 		})

@@ -94,7 +94,7 @@ func TestQueueList(t *testing.T) {
 
 	// Add tasks and verify
 	for i := 0; i < 3; i++ {
-		tq.Add(func(ctx context.Context) {})
+		_, _ = tq.Add(func(ctx context.Context) {})
 	}
 
 	tasks := tq.List()
@@ -139,7 +139,7 @@ func TestQueueStatusMethods(t *testing.T) {
 
 	// Add tasks
 	for i := 0; i < 5; i++ {
-		tq.Add(func(ctx context.Context) {})
+		_, _ = tq.Add(func(ctx context.Context) {})
 	}
 
 	// HasWaiting
@@ -214,7 +214,7 @@ func TestQueueStartTask(t *testing.T) {
 
 		// Add tasks
 		for i := 0; i < numTasks; i++ {
-			tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {})
 		}
 
 		// Start all
@@ -348,7 +348,7 @@ func TestQueueUnlock(t *testing.T) {
 	}()
 
 	time.Sleep(10 * time.Millisecond)
-	tq.Add(func(ctx context.Context) {})
+	_, _ = tq.Add(func(ctx context.Context) {})
 	tq.Unlock()
 
 	select {
@@ -407,7 +407,7 @@ func TestQueueConcurrency(t *testing.T) {
 
 		// Add tasks
 		for i := 0; i < numTasks; i++ {
-			tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {})
 		}
 
 		// Start concurrently
@@ -497,7 +497,7 @@ func TestQueueEdgeCases(t *testing.T) {
 		numTasks := 5
 
 		for i := 0; i < numTasks; i++ {
-			tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {})
 		}
 
 		list := tq.List()
@@ -517,12 +517,12 @@ func TestQueueEdgeCases(t *testing.T) {
 
 	t.Run("capacity limits", func(t *testing.T) {
 		capacities := []int{1, 5, 15}
-		for _, cap := range capacities {
-			t.Run(fmt.Sprintf("capacity_%d", cap), func(t *testing.T) {
-				tq := newTestQueue(cap)
+		for _, capacity := range capacities {
+			t.Run(fmt.Sprintf("capacity_%d", capacity), func(t *testing.T) {
+				tq := newTestQueue(capacity)
 
 				// Fill to capacity
-				for i := 0; i < cap; i++ {
+				for i := 0; i < capacity; i++ {
 					if _, err := tq.Add(func(ctx context.Context) {}); err != nil {
 						t.Fatalf("error at task %d: %v", i, err)
 					}
@@ -579,7 +579,7 @@ func TestQueueIntegration(t *testing.T) {
 
 		// Add tasks
 		for i := 0; i < 5; i++ {
-			tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {})
 		}
 
 		// Start first task
