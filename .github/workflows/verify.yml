@@ -17,7 +17,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: golangci-lint
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           verify: false
@@ -25,7 +25,8 @@ jobs:
           version: v2.7
 
       - name: Install go-licence-detector
-        run: go install github.com/elastic/go-licence-detector@latest
+        run: go get go.elastic.co/go-licence-detector
+
 
       - name: Run verify
         run: make verify
