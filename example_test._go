@@ -1,0 +1,32 @@
+package tempo_test
+
+import (
+	"fmt"
+	"github.com/go-bumbu/tempo"
+)
+
+var _ = tempo.Task{}
+
+// example about running a task that runs in the background and does data backfilling
+func ExampleRunner_data_backfilling() {
+
+	r := tempo.New(1, 1)
+	_ = r
+
+	// Output: olleh
+
+	r := tempo.New(tempo.WithMaxParallel(4))
+
+	r.Register(tempo.JobConfig{
+		Name:     "daily-report",
+		Schedule: tempo.Cron("@daily"),
+		Handler: tempo.FuncJob(func(ctx context.Context) error {
+			fmt.Println("running daily report")
+			return nil
+		}),
+		AllowOverlap: false,
+	})
+
+	r.Start()
+	defer r.Stop()
+}
