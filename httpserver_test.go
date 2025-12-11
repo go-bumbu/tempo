@@ -28,7 +28,7 @@ func TestRunMultipleHttpServers(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-	})
+	}, "server1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestRunMultipleHttpServers(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
-	})
+	}, "server2")
 	if err != nil {
 		t.Fatal(err)
 	}

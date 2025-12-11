@@ -1,10 +1,10 @@
-package tempo_test
+package tempo
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/go-bumbu/tempo"
+
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"sync"
@@ -13,16 +13,18 @@ import (
 )
 
 // Helper to create a test queue
-func newTestQueue(size int) *tempo.Queue {
-	return tempo.NewQueue(tempo.QueueCfg{QueueSize: size})
+func newTestQueue(size int) *queue {
+	return newQueue(QueueCfg{QueueSize: size})
 }
+
+const myActionName = "myActionName"
 
 func TestQueueAdd(t *testing.T) {
 	t.Run("basic add operations", func(t *testing.T) {
 		tq := newTestQueue(10)
 
 		// Add single task
-		id, err := tq.Add(func(ctx context.Context) {})
+		id, err := tq.Add(func(ctx context.Context) {}, myActionName)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -33,7 +35,7 @@ func TestQueueAdd(t *testing.T) {
 		// Add multiple tasks with unique IDs
 		ids := make(map[uuid.UUID]bool)
 		for i := 0; i < 5; i++ {
-			id, err := tq.Add(func(ctx context.Context) {})
+			id, err := tq.Add(func(ctx context.Context) {}, myActionName)
 			if err != nil {
 				t.Fatalf("error adding task %d: %v", i, err)
 			}
@@ -53,13 +55,13 @@ func TestQueueAdd(t *testing.T) {
 		tq := newTestQueue(3)
 
 		for i := 0; i < 3; i++ {
-			if _, err := tq.Add(func(ctx context.Context) {}); err != nil {
+			if _, err := tq.Add(func(ctx context.Context) {}, myActionName); err != nil {
 				t.Fatalf("error at task %d: %v", i, err)
 			}
 		}
 
-		_, err := tq.Add(func(ctx context.Context) {})
-		if !errors.Is(err, tempo.ErrQueueFull) {
+		_, err := tq.Add(func(ctx context.Context) {}, myActionName)
+		if !errors.Is(err, ErrQueueFull) {
 			t.Errorf("expected ErrQueueFull, got: %v", err)
 		}
 	})
@@ -73,7 +75,7 @@ func TestQueueAdd(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, _ = tq.Add(func(ctx context.Context) {})
+				_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 			}()
 		}
 		wg.Wait()
@@ -94,7 +96,7 @@ func TestQueueList(t *testing.T) {
 
 	// Add tasks and verify
 	for i := 0; i < 3; i++ {
-		_, _ = tq.Add(func(ctx context.Context) {})
+		_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 	}
 
 	tasks := tq.List()
@@ -104,7 +106,7 @@ func TestQueueList(t *testing.T) {
 
 	// Verify task info
 	for i, task := range tasks {
-		if task.Status != tempo.TaskStatusWaiting {
+		if task.Status != TaskStatusWaiting {
 			t.Errorf("task %d: expected waiting status, got %v", i, task.Status)
 		}
 		if task.ID == uuid.Nil {
@@ -119,8 +121,8 @@ func TestQueueList(t *testing.T) {
 	list1 := tq.List()
 	list2 := tq.List()
 	if len(list1) > 0 {
-		list1[0].Status = tempo.TaskStatusRunning
-		if list2[0].Status != tempo.TaskStatusWaiting {
+		list1[0].Status = TaskStatusRunning
+		if list2[0].Status != TaskStatusWaiting {
 			t.Error("modifying list1 affected list2")
 		}
 	}
@@ -133,13 +135,13 @@ func TestQueueStatusMethods(t *testing.T) {
 	if tq.HasWaiting() {
 		t.Error("empty queue should not have waiting tasks")
 	}
-	if tq.CountStatus(tempo.TaskStatusWaiting) != 0 {
+	if tq.CountStatus(TaskStatusWaiting) != 0 {
 		t.Error("empty queue should have 0 waiting tasks")
 	}
 
 	// Add tasks
 	for i := 0; i < 5; i++ {
-		_, _ = tq.Add(func(ctx context.Context) {})
+		_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 	}
 
 	// HasWaiting
@@ -148,10 +150,10 @@ func TestQueueStatusMethods(t *testing.T) {
 	}
 
 	// CountStatus
-	if count := tq.CountStatus(tempo.TaskStatusWaiting); count != 5 {
+	if count := tq.CountStatus(TaskStatusWaiting); count != 5 {
 		t.Errorf("expected 5 waiting tasks, got %d", count)
 	}
-	if count := tq.CountStatus(tempo.TaskStatusRunning); count != 0 {
+	if count := tq.CountStatus(TaskStatusRunning); count != 0 {
 		t.Errorf("expected 0 running tasks, got %d", count)
 	}
 }
@@ -159,13 +161,13 @@ func TestQueueStatusMethods(t *testing.T) {
 func TestQueueSetStatus(t *testing.T) {
 	tq := newTestQueue(10)
 
-	id, _ := tq.Add(func(ctx context.Context) {})
+	id, _ := tq.Add(func(ctx context.Context) {}, myActionName)
 
 	// Change status
-	statusTransitions := []tempo.TaskStatus{
-		tempo.TaskStatusRunning,
-		tempo.TaskStatusComplete,
-		tempo.TaskStatusWaiting,
+	statusTransitions := []TaskStatus{
+		TaskStatusRunning,
+		TaskStatusComplete,
+		TaskStatusWaiting,
 	}
 
 	for _, status := range statusTransitions {
@@ -182,12 +184,12 @@ func TestQueueStartTask(t *testing.T) {
 		tq := newTestQueue(10)
 
 		// Empty queue
-		if _, err := tq.StartTask(); !errors.Is(err, tempo.ErrTaskNotFound) {
+		if _, err := tq.StartTask(); !errors.Is(err, ErrTaskNotFound) {
 			t.Errorf("expected ErrTaskNotFound, got: %v", err)
 		}
 
 		// Add and start task
-		id, _ := tq.Add(func(ctx context.Context) {})
+		id, _ := tq.Add(func(ctx context.Context) {}, myActionName)
 		task, err := tq.StartTask()
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -195,15 +197,15 @@ func TestQueueStartTask(t *testing.T) {
 		if task.ID != id {
 			t.Errorf("expected ID %v, got %v", id, task.ID)
 		}
-		if task.Status != tempo.TaskStatusRunning {
+		if task.Status != TaskStatusRunning {
 			t.Errorf("expected running status, got %v", task.Status)
 		}
 
 		// Verify status in queue
-		if tq.CountStatus(tempo.TaskStatusRunning) != 1 {
+		if tq.CountStatus(TaskStatusRunning) != 1 {
 			t.Error("expected 1 running task")
 		}
-		if tq.CountStatus(tempo.TaskStatusWaiting) != 0 {
+		if tq.CountStatus(TaskStatusWaiting) != 0 {
 			t.Error("expected 0 waiting tasks")
 		}
 	})
@@ -214,7 +216,7 @@ func TestQueueStartTask(t *testing.T) {
 
 		// Add tasks
 		for i := 0; i < numTasks; i++ {
-			_, _ = tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 		}
 
 		// Start all
@@ -231,12 +233,12 @@ func TestQueueStartTask(t *testing.T) {
 		}
 
 		// All should be running
-		if tq.CountStatus(tempo.TaskStatusRunning) != numTasks {
-			t.Errorf("expected %d running tasks, got %d", numTasks, tq.CountStatus(tempo.TaskStatusRunning))
+		if tq.CountStatus(TaskStatusRunning) != numTasks {
+			t.Errorf("expected %d running tasks, got %d", numTasks, tq.CountStatus(TaskStatusRunning))
 		}
 
 		// Next start should fail
-		if _, err := tq.StartTask(); !errors.Is(err, tempo.ErrTaskNotFound) {
+		if _, err := tq.StartTask(); !errors.Is(err, ErrTaskNotFound) {
 			t.Errorf("expected ErrTaskNotFound, got: %v", err)
 		}
 	})
@@ -244,12 +246,12 @@ func TestQueueStartTask(t *testing.T) {
 	t.Run("start only affects waiting tasks", func(t *testing.T) {
 		tq := newTestQueue(10)
 
-		id1, _ := tq.Add(func(ctx context.Context) {})
-		id2, _ := tq.Add(func(ctx context.Context) {})
-		id3, _ := tq.Add(func(ctx context.Context) {})
+		id1, _ := tq.Add(func(ctx context.Context) {}, myActionName)
+		id2, _ := tq.Add(func(ctx context.Context) {}, myActionName)
+		id3, _ := tq.Add(func(ctx context.Context) {}, myActionName)
 
 		// Set middle task to completed
-		tq.SetStatus(id2, tempo.TaskStatusComplete)
+		tq.SetStatus(id2, TaskStatusComplete)
 
 		// Start should skip completed task
 		task, _ := tq.StartTask()
@@ -265,7 +267,7 @@ func TestQueueStartTask(t *testing.T) {
 		// Verify id2 still completed
 		tasks := tq.List()
 		for _, task := range tasks {
-			if task.ID == id2 && task.Status != tempo.TaskStatusComplete {
+			if task.ID == id2 && task.Status != TaskStatusComplete {
 				t.Errorf("task %v status changed unexpectedly", id2)
 			}
 		}
@@ -275,7 +277,7 @@ func TestQueueStartTask(t *testing.T) {
 func TestQueueWaitForTask(t *testing.T) {
 	t.Run("immediate return when task waiting", func(t *testing.T) {
 		tq := newTestQueue(10)
-		_, err := tq.Add(func(ctx context.Context) {})
+		_, err := tq.Add(func(ctx context.Context) {}, myActionName)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -303,7 +305,7 @@ func TestQueueWaitForTask(t *testing.T) {
 		}
 
 		// Add task to unblock
-		_, err := tq.Add(func(ctx context.Context) {})
+		_, err := tq.Add(func(ctx context.Context) {}, myActionName)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -336,8 +338,8 @@ func TestQueueUnlock(t *testing.T) {
 	tq.Unlock()
 	tq.Unlock()
 
-	// Queue should still work
-	if _, err := tq.Add(func(ctx context.Context) {}); err != nil {
+	// queue should still work
+	if _, err := tq.Add(func(ctx context.Context) {}, myActionName); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
@@ -348,7 +350,7 @@ func TestQueueUnlock(t *testing.T) {
 	}()
 
 	time.Sleep(10 * time.Millisecond)
-	_, _ = tq.Add(func(ctx context.Context) {})
+	_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 	tq.Unlock()
 
 	select {
@@ -367,7 +369,7 @@ func TestQueueConcurrency(t *testing.T) {
 
 		// Initial tasks
 		for i := 0; i < 10; i++ {
-			_, err := tq.Add(func(ctx context.Context) {})
+			_, err := tq.Add(func(ctx context.Context) {}, myActionName)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -377,7 +379,7 @@ func TestQueueConcurrency(t *testing.T) {
 		// Mix of operations
 		for i := 0; i < 5; i++ {
 			wg.Go(func() {
-				_, err := tq.Add(func(ctx context.Context) {})
+				_, err := tq.Add(func(ctx context.Context) {}, myActionName)
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
 				}
@@ -389,13 +391,13 @@ func TestQueueConcurrency(t *testing.T) {
 				_ = tq.HasWaiting()
 			})
 			wg.Go(func() {
-				_ = tq.CountStatus(tempo.TaskStatusWaiting)
+				_ = tq.CountStatus(TaskStatusWaiting)
 			})
 		}
 
 		wg.Wait()
 
-		// Queue should still be consistent
+		// queue should still be consistent
 		if len(tq.List()) < 10 {
 			t.Errorf("expected at least 10 tasks, got %d", len(tq.List()))
 		}
@@ -407,7 +409,7 @@ func TestQueueConcurrency(t *testing.T) {
 
 		// Add tasks
 		for i := 0; i < numTasks; i++ {
-			_, _ = tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 		}
 
 		// Start concurrently
@@ -437,8 +439,8 @@ func TestQueueConcurrency(t *testing.T) {
 			t.Errorf("concurrent error: %v", err)
 		}
 
-		if tq.CountStatus(tempo.TaskStatusRunning) != numTasks {
-			t.Errorf("expected %d running, got %d", numTasks, tq.CountStatus(tempo.TaskStatusRunning))
+		if tq.CountStatus(TaskStatusRunning) != numTasks {
+			t.Errorf("expected %d running, got %d", numTasks, tq.CountStatus(TaskStatusRunning))
 		}
 	})
 
@@ -448,7 +450,7 @@ func TestQueueConcurrency(t *testing.T) {
 		// Add tasks
 		ids := make([]uuid.UUID, 10)
 		for i := range ids {
-			ids[i], _ = tq.Add(func(ctx context.Context) {})
+			ids[i], _ = tq.Add(func(ctx context.Context) {}, myActionName)
 		}
 
 		var wg sync.WaitGroup
@@ -457,9 +459,9 @@ func TestQueueConcurrency(t *testing.T) {
 			go func(taskID uuid.UUID, idx int) {
 				defer wg.Done()
 				if idx%2 == 0 {
-					tq.SetStatus(taskID, tempo.TaskStatusRunning)
+					tq.SetStatus(taskID, TaskStatusRunning)
 				} else {
-					tq.SetStatus(taskID, tempo.TaskStatusComplete)
+					tq.SetStatus(taskID, TaskStatusComplete)
 				}
 			}(id, i)
 		}
@@ -469,9 +471,9 @@ func TestQueueConcurrency(t *testing.T) {
 		// Verify statuses updated
 		tasks := tq.List()
 		for i, task := range tasks {
-			expectedStatus := tempo.TaskStatusRunning
+			expectedStatus := TaskStatusRunning
 			if i%2 != 0 {
-				expectedStatus = tempo.TaskStatusComplete
+				expectedStatus = TaskStatusComplete
 			}
 			if task.Status != expectedStatus {
 				t.Errorf("task %d: expected %v, got %v", i, expectedStatus, task.Status)
@@ -483,7 +485,7 @@ func TestQueueConcurrency(t *testing.T) {
 func TestQueueEdgeCases(t *testing.T) {
 	t.Run("nil function", func(t *testing.T) {
 		tq := newTestQueue(10)
-		id, err := tq.Add(nil)
+		id, err := tq.Add(nil, myActionName)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -497,11 +499,11 @@ func TestQueueEdgeCases(t *testing.T) {
 		numTasks := 5
 
 		for i := 0; i < numTasks; i++ {
-			_, _ = tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 		}
 
 		list := tq.List()
-		count := tq.CountStatus(tempo.TaskStatusWaiting)
+		count := tq.CountStatus(TaskStatusWaiting)
 		hasWaiting := tq.HasWaiting()
 
 		if len(list) != numTasks {
@@ -523,13 +525,13 @@ func TestQueueEdgeCases(t *testing.T) {
 
 				// Fill to capacity
 				for i := 0; i < capacity; i++ {
-					if _, err := tq.Add(func(ctx context.Context) {}); err != nil {
+					if _, err := tq.Add(func(ctx context.Context) {}, myActionName); err != nil {
 						t.Fatalf("error at task %d: %v", i, err)
 					}
 				}
 
 				// Next should fail
-				if _, err := tq.Add(func(ctx context.Context) {}); !errors.Is(err, tempo.ErrQueueFull) {
+				if _, err := tq.Add(func(ctx context.Context) {}, myActionName); !errors.Is(err, ErrQueueFull) {
 					t.Errorf("expected ErrQueueFull, got: %v", err)
 				}
 			})
@@ -544,15 +546,15 @@ func TestQueueIntegration(t *testing.T) {
 		// Add tasks
 		addedIDs := make([]uuid.UUID, 10)
 		for i := range addedIDs {
-			addedIDs[i], _ = tq.Add(func(ctx context.Context) {})
+			addedIDs[i], _ = tq.Add(func(ctx context.Context) {}, myActionName)
 		}
 
 		// Verify initial state
 		if !tq.HasWaiting() {
 			t.Error("expected waiting tasks")
 		}
-		if tq.CountStatus(tempo.TaskStatusWaiting) != 10 {
-			t.Errorf("expected 10 waiting tasks, got %d", tq.CountStatus(tempo.TaskStatusWaiting))
+		if tq.CountStatus(TaskStatusWaiting) != 10 {
+			t.Errorf("expected 10 waiting tasks, got %d", tq.CountStatus(TaskStatusWaiting))
 		}
 
 		// List tasks
@@ -579,23 +581,23 @@ func TestQueueIntegration(t *testing.T) {
 
 		// Add tasks
 		for i := 0; i < 5; i++ {
-			_, _ = tq.Add(func(ctx context.Context) {})
+			_, _ = tq.Add(func(ctx context.Context) {}, myActionName)
 		}
 
 		// Start first task
 		task1, _ := tq.StartTask()
-		if task1.Status != tempo.TaskStatusRunning {
+		if task1.Status != TaskStatusRunning {
 			t.Errorf("expected running, got %v", task1.Status)
 		}
 
 		// Complete it
-		tq.SetStatus(task1.ID, tempo.TaskStatusComplete)
+		tq.SetStatus(task1.ID, TaskStatusComplete)
 
 		// Verify counts
-		want := map[tempo.TaskStatus]int{
-			tempo.TaskStatusWaiting:  4,
-			tempo.TaskStatusRunning:  0,
-			tempo.TaskStatusComplete: 1,
+		want := map[TaskStatus]int{
+			TaskStatusWaiting:  4,
+			TaskStatusRunning:  0,
+			TaskStatusComplete: 1,
 		}
 
 		for status, count := range want {
@@ -607,11 +609,11 @@ func TestQueueIntegration(t *testing.T) {
 		// Complete remaining tasks
 		for i := 0; i < 4; i++ {
 			task, _ := tq.StartTask()
-			tq.SetStatus(task.ID, tempo.TaskStatusComplete)
+			tq.SetStatus(task.ID, TaskStatusComplete)
 		}
 
-		if tq.CountStatus(tempo.TaskStatusComplete) != 5 {
-			t.Errorf("expected 5 completed, got %d", tq.CountStatus(tempo.TaskStatusComplete))
+		if tq.CountStatus(TaskStatusComplete) != 5 {
+			t.Errorf("expected 5 completed, got %d", tq.CountStatus(TaskStatusComplete))
 		}
 	})
 
@@ -620,7 +622,7 @@ func TestQueueIntegration(t *testing.T) {
 		tq := newTestQueue(capacity)
 
 		for i := 0; i < capacity; i++ {
-			if _, err := tq.Add(func(ctx context.Context) {}); err != nil {
+			if _, err := tq.Add(func(ctx context.Context) {}, myActionName); err != nil {
 				t.Fatalf("error at task %d: %v", i, err)
 			}
 		}
@@ -630,7 +632,7 @@ func TestQueueIntegration(t *testing.T) {
 			t.Errorf("unexpected count (-got +want)\n%s", diff)
 		}
 
-		if _, err := tq.Add(func(ctx context.Context) {}); err == nil {
+		if _, err := tq.Add(func(ctx context.Context) {}, myActionName); err == nil {
 			t.Error("expected error when adding to full queue")
 		}
 	})

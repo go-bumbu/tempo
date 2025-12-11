@@ -10,7 +10,7 @@ import (
 
 // QueueRunner is a task runner that manages task execution with parallelism control
 type QueueRunner struct {
-	queue *Queue
+	queue *queue
 
 	wg sync.WaitGroup
 
@@ -25,7 +25,7 @@ type QueueRunner struct {
 
 // NewQueueRunner creates a new QueueRunner instance
 func NewQueueRunner(cfg QueueCfg) *QueueRunner {
-	q := NewQueue(cfg)
+	q := newQueue(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &QueueRunner{
 		queue: q,
@@ -75,8 +75,8 @@ func (r *QueueRunner) StartBg() {
 }
 
 // Add adds a new task to the runner
-func (r *QueueRunner) Add(fn func(ctx context.Context)) (uuid.UUID, error) {
-	return r.queue.Add(fn)
+func (r *QueueRunner) Add(fn func(ctx context.Context), name string) (uuid.UUID, error) {
+	return r.queue.Add(fn, name)
 }
 
 var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")

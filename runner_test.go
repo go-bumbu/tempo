@@ -29,7 +29,7 @@ func TestRunnerParallelism(t *testing.T) {
 					result = append(result, strconv.Itoa(n))
 					lock.Unlock()
 					time.Sleep(10 * time.Minute)
-				})
+				}, strconv.Itoa(n))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -69,7 +69,7 @@ func TestRunnerParallelism(t *testing.T) {
 					result = append(result, strconv.Itoa(i))
 					lock.Unlock()
 					time.Sleep(10 * time.Minute)
-				})
+				}, "some action")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -111,7 +111,7 @@ func TestRunnerLimit(t *testing.T) {
 		// put one task into running
 		_, err := r.Add(func(ctx context.Context) {
 			time.Sleep(10 * time.Minute)
-		})
+		}, "some action")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,7 +122,7 @@ func TestRunnerLimit(t *testing.T) {
 		for i := 1; i <= 5; i++ {
 			_, err := r.Add(func(ctx context.Context) {
 				time.Sleep(10 * time.Minute)
-			})
+			}, "some action")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,7 +131,7 @@ func TestRunnerLimit(t *testing.T) {
 		// expect que full error
 		_, err = r.Add(func(ctx context.Context) {
 			time.Sleep(10 * time.Minute)
-		})
+		}, "some action")
 
 		if !errors.Is(err, tempo.ErrQueueFull) {
 			t.Errorf("expect err to be tempo.ErrQueueFull but got %v", err)
@@ -175,7 +175,7 @@ func TestRunnerShutdown(t *testing.T) {
 						lock.Unlock()
 						return
 					}
-				})
+				}, "some action")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -230,7 +230,7 @@ func TestRunnerShutdown(t *testing.T) {
 						lock.Unlock()
 						return
 					}
-				})
+				}, "some action")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -274,7 +274,7 @@ func TestRunnerRaceConditions(t *testing.T) {
 			for i := 1; i <= 4; i++ {
 				_, err := r.Add(func(ctx context.Context) {
 					time.Sleep(10 * time.Minute)
-				})
+				}, "some action")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -324,7 +324,7 @@ func TestRunnerCatchPanic(t *testing.T) {
 			_, err := r.Add(func(ctx context.Context) {
 				time.Sleep(1 * time.Minute)
 				panic("panic")
-			})
+			}, "some action")
 			if err != nil {
 				t.Fatal(err)
 			}
