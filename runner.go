@@ -2,14 +2,15 @@ package tempo
 
 import (
 	"context"
+	"errors"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	"sync"
 )
 
-// Runner is a task runner that manages task execution with parallelism control
-type Runner struct {
-	queue *TaskQueue
+// QueueRunner is a task runner that manages task execution with parallelism control
+type QueueRunner struct {
+	queue *Queue
 
 	wg sync.WaitGroup
 
@@ -22,11 +23,11 @@ type Runner struct {
 	stopChan chan struct{}
 }
 
-// NewRunner creates a new Runner instance
-func NewRunner(cfg TaskQueueCfg) *Runner {
-	q := NewTaskQueue(cfg)
+// NewQueueRunner creates a new QueueRunner instance
+func NewQueueRunner(cfg QueueCfg) *QueueRunner {
+	q := NewQueue(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Runner{
+	return &QueueRunner{
 		queue: q,
 
 		ctx:    ctx,
@@ -36,8 +37,8 @@ func NewRunner(cfg TaskQueueCfg) *Runner {
 	}
 }
 
-// Run begins processing tasks
-func (r *Runner) Run() {
+// StartBg begins processing tasks
+func (r *QueueRunner) StartBg() {
 
 	sem := make(chan struct{})
 
@@ -97,12 +98,14 @@ func (r *Runner) Run() {
 }
 
 // Add adds a new task to the runner
-func (r *Runner) Add(fn func(ctx context.Context)) (uuid.UUID, error) {
+func (r *QueueRunner) Add(fn func(ctx context.Context)) (uuid.UUID, error) {
 	return r.queue.Add(fn)
 }
 
+var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")
+
 // ShutDown gracefully shuts down the runner
-func (r *Runner) ShutDown(ctx context.Context) error {
+func (r *QueueRunner) ShutDown(ctx context.Context) error {
 	var err error
 
 	r.stopOnce.Do(func() {
@@ -128,11 +131,11 @@ func (r *Runner) ShutDown(ctx context.Context) error {
 }
 
 // Wait blocks until the runner has shut down
-func (r *Runner) Wait() {
+func (r *QueueRunner) Wait() {
 	<-r.stopChan
 }
 
 // List returns information about all tasks
-func (r *Runner) List() []QueueTaskInfo {
+func (r *QueueRunner) List() []QueueTaskInfo {
 	return r.queue.List()
 }

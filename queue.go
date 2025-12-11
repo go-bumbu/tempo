@@ -3,39 +3,20 @@ package tempo
 import (
 	"context"
 	"errors"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	"sync"
 	"time"
 )
 
 type Queue struct {
-	maxParallelism int // Max concurrent waitingTasks for this queue
-	queueSize      int // Max total waitingTasks waiting
-	historySize    int // amount of waitingTasks to keep in completed
+	mu    sync.Mutex
+	cond  *sync.Cond
+	tasks []*QueuedTask // ideally to avoid iterators this should be a sorted map
 
-	// runtime context
-	tasks []*QueuedTask
-
-	mu   sync.Mutex
-	wg   sync.WaitGroup
-	cond *sync.Cond
-
-	// handle shutdown
-	ctx      context.Context
-	cancel   context.CancelFunc
-	stopOnce sync.Once
-	stopChan chan struct{}
+	maxWaiting int
+	maxRunning int
+	maxDone    int
 }
-
-// TaskStatus represents the current state of a task
-type TaskStatus string
-
-const (
-	defaultMaxParallel = 1
-	defaultQueueSize   = 0
-	defaultHistory     = 10
-)
 
 type QueueCfg struct {
 	QueueSize      int
@@ -44,186 +25,41 @@ type QueueCfg struct {
 }
 
 func NewQueue(cfg QueueCfg) *Queue {
+	t := Queue{
+		mu:    sync.Mutex{},
+		tasks: []*QueuedTask{},
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	q := &Queue{
-		maxParallelism: defaultMaxParallel,
-		queueSize:      defaultQueueSize,
-		historySize:    defaultHistory,
-		tasks:          []*QueuedTask{},
-		mu:             sync.Mutex{},
-
-		// shutdown
-		ctx:      ctx,
-		cancel:   cancel,
-		stopOnce: sync.Once{},
-		stopChan: make(chan struct{}),
+		maxWaiting: cfg.QueueSize,
+		maxRunning: cfg.MaxParallelism,
+		maxDone:    cfg.HistorySize,
 	}
-	q.cond = sync.NewCond(&q.mu)
-
-	if cfg.MaxParallelism > 0 {
-		q.maxParallelism = cfg.MaxParallelism
-	}
-	if cfg.QueueSize > 0 {
-		q.queueSize = cfg.QueueSize
-	}
-	if cfg.HistorySize > 0 {
-		q.historySize = cfg.HistorySize
-	}
-
-	return q
-}
-
-func (q *Queue) Start() {
-
-	q.wg.Go(func() {
-		<-q.ctx.Done()
-		// Wake up waitForTask() for the last time during shutdown
-		q.cond.Signal()
-	})
-
-	tasksCh := make(chan *QueuedTask)
-
-	// main control loop
-	q.wg.Go(func() {
-		defer close(tasksCh)
-
-		for {
-			task, err := q.waitForTask(q.ctx)
-			if err != nil {
-				return
-			}
-			select {
-			case tasksCh <- task:
-				// Task sent, wait for the next one.
-			case <-q.ctx.Done():
-				return
-			}
-		}
-	})
-
-	// workers
-	for range q.maxParallelism {
-		q.wg.Go(func() {
-			for task := range tasksCh {
-				func() {
-					defer func() {
-						// If the task panics, record the panic as an error.
-						if v := recover(); v != nil {
-							spew.Dump(v)
-							// todo handle error
-							//task.data.err = fmt.Errorf("panic: %v", v)
-						}
-						// Drop the reference to the function, so it can be GC'ed.
-						// task.data.f = nil
-						// Close the task "done" channel, so Wait() unblocks.
-						//close(task.data.done)
-					}()
-
-					q.mu.Lock()
-					task.Status = TaskStatusRunning
-					q.mu.Unlock()
-
-					panic(task)
-
-					// todo get error
-					task.Task(q.ctx)
-					//task.data.err = task.data.f(ctx)
-				}()
-			}
-		})
-	}
-
-	// todo move to background, dont wait
-	//q.wg.Wait()
-	//
-	//for _, t := range q.waitingTasks {
-	//	close(t.data.done)
-	//}
-	//
-	//q.waitingTasks = nil
-}
-
-func (q *Queue) waitForTask(ctx context.Context) (*QueuedTask, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	for q.countTaskStatus(TaskStatusWaiting) == 0 {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-			q.cond.Wait()
-		}
-	}
-
-	// get the first waiting task
-	var task *QueuedTask
-	for i, _ := range q.tasks {
-		if q.tasks[i].Status == TaskStatusWaiting {
-			task = q.tasks[i]
-		}
-	}
-
-	if task == nil {
-		panic("no task found")
-	}
-
-	return task, nil
-}
-
-func (q *Queue) countTaskStatus(in TaskStatus) int {
-	n := 0
-	for i, _ := range q.tasks {
-		if q.tasks[i].Status == in {
-			n++
-		}
-	}
-	return n
-}
-
-func (q *Queue) Wait() {
-	<-q.stopChan
-}
-
-var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")
-
-func (q *Queue) ShutDown(ctx context.Context) error {
-
-	var err error
-
-	q.stopOnce.Do(func() {
-		q.cancel() // notify running jobs to stop
-
-		shutdownCh := make(chan struct{})
-		go func() {
-			q.wg.Wait()
-			close(shutdownCh)
-		}()
-
-		select {
-		case <-shutdownCh:
-			err = nil
-		case <-ctx.Done():
-			err = ErrUnsafeStop
-		}
-
-		// Unblock Wait() if it's waiting
-		close(q.stopChan)
-	})
-	return err
+	t.cond = sync.NewCond(&t.mu)
+	return &t
 }
 
 var ErrQueueFull = errors.New("queue full")
 
+type TaskStatus int
+
 const (
-	TaskStatusWaiting  TaskStatus = "waiting"
-	TaskStatusRunning  TaskStatus = "running"
-	TaskStatusComplete TaskStatus = "completed"
+	TaskStatusWaiting TaskStatus = iota
+	TaskStatusRunning
+	TaskStatusComplete
 )
 
-// QueuedTask wraps a task with metadata
+func (s TaskStatus) Str() string {
+	switch s {
+	case TaskStatusWaiting:
+		return "waiting"
+	case TaskStatusRunning:
+		return "running"
+	case TaskStatusComplete:
+		return "complete"
+	default:
+		return "unknown"
+	}
+}
+
 type QueuedTask struct {
 	ID        uuid.UUID                 // Unique identifier for the task
 	Task      func(ctx context.Context) // The actual task (for simple functions)
@@ -232,26 +68,26 @@ type QueuedTask struct {
 	StartedAt time.Time // When it started running
 }
 
-func (q *Queue) Add(task func(ctx context.Context)) (uuid.UUID, error) {
-	taskId := uuid.New()
-	qt := QueuedTask{
-		ID:       taskId,
-		Task:     task,
-		Status:   TaskStatusWaiting,
-		QueuedAt: time.Now(),
-	}
+func (q *Queue) Add(fn func(ctx context.Context)) (uuid.UUID, error) {
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.countTaskStatus(TaskStatusWaiting) >= q.queueSize {
-		return taskId, ErrQueueFull
+	if q.CountStatus(TaskStatusWaiting) >= q.maxWaiting {
+		return uuid.Nil, ErrQueueFull
 	}
 
-	q.tasks = append(q.tasks, &qt)
-	q.cond.Signal()
+	id := uuid.New()
+	q.tasks = append(q.tasks, &QueuedTask{
+		ID:        id,
+		Task:      fn,
+		Status:    TaskStatusWaiting,
+		QueuedAt:  time.Now(),
+		StartedAt: time.Time{},
+	})
 
-	return taskId, nil
+	q.cond.Signal()
+	return id, nil
 }
 
 type QueueTaskInfo struct {
@@ -266,10 +102,6 @@ func (q *Queue) List() []QueueTaskInfo {
 	defer q.mu.Unlock()
 
 	var info []QueueTaskInfo
-	//
-
-	spew.Dump("tasks", q.tasks)
-
 	for _, task := range q.tasks {
 		qt := QueueTaskInfo{
 			ID:        task.ID,
@@ -279,12 +111,84 @@ func (q *Queue) List() []QueueTaskInfo {
 		}
 		info = append(info, qt)
 	}
-
 	return info
 }
 
-func (q *Queue) CancelJob() {
-	//todo cancel running job
-	// todo cancel pending job
+func (q *Queue) HasWaiting() bool {
+	for i, _ := range q.tasks {
+		if q.tasks[i].Status == TaskStatusWaiting {
+			return true
+		}
+	}
+	return false
+}
 
+func (q *Queue) SetStatus(id uuid.UUID, status TaskStatus) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, _ := range q.tasks {
+		if q.tasks[i].ID == id {
+			q.tasks[i].Status = status
+			return
+		}
+	}
+	return
+}
+
+func (q *Queue) CountStatus(status TaskStatus) int {
+	n := 0
+	for i, _ := range q.tasks {
+		if q.tasks[i].Status == status {
+			n++
+		}
+	}
+	return n
+}
+
+var ErrTaskNotFound = errors.New("task not found")
+
+func (q *Queue) WaitForTask(ctx context.Context) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for !q.HasWaiting() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			q.cond.Wait()
+		}
+	}
+	return nil
+}
+
+func (q *Queue) StartWaiting() (*QueuedTask, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, _ := range q.tasks {
+		if q.tasks[i].Status == TaskStatusWaiting {
+			q.tasks[i].Status = TaskStatusRunning
+			return q.tasks[i], nil
+		}
+	}
+	return nil, ErrTaskNotFound
+}
+
+func (q *Queue) GetFirst(status TaskStatus) (*QueuedTask, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, _ := range q.tasks {
+		if q.tasks[i].Status == status {
+			return q.tasks[i], nil
+		}
+	}
+	return nil, ErrTaskNotFound
+}
+
+func (q *Queue) Unlock() {
+	q.cond.Signal()
+}
+
+func (q *Queue) Cancel() {
+	panic("not implemented")
 }

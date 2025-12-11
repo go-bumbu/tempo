@@ -13,8 +13,8 @@ import (
 // this is a sample on how to use tempo to start and stop multiple http servers
 // this is just a demonstration of a more complex use-case
 func TestRunMultipleHttpServers(t *testing.T) {
-	q := tempo.NewQueue(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 0})
-	q.Start()
+	q := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 0})
+	q.StartBg()
 
 	port1, err := GetFreePort()
 	if err != nil {
@@ -87,7 +87,7 @@ func httpServer(ctx context.Context, port int) error {
 		}),
 	}
 
-	// Run server in goroutine
+	// StartBg server in goroutine
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- srv.ListenAndServe()
