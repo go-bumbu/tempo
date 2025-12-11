@@ -254,50 +254,54 @@ func TestRunnerShutdown(t *testing.T) {
 	})
 }
 
-func TestRunnerListJobs(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 20})
-		r.StartBg()
+func TestRunnerRaceConditions(t *testing.T) {
+	t.Run("max parallelism reached", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 20})
+			r.StartBg()
 
-		// add 3 jobs
-		for i := 1; i <= 4; i++ {
-			_, err := r.Add(func(ctx context.Context) {
-				time.Sleep(10 * time.Minute)
-			})
-			if err != nil {
-				t.Fatal(err)
+			// add 3 jobs
+			for i := 1; i <= 4; i++ {
+				_, err := r.Add(func(ctx context.Context) {
+					time.Sleep(10 * time.Minute)
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
 
-		// wait to get the tasks scheduled
-		time.Sleep(1 * time.Minute)
+			// wait to get the tasks scheduled
+			time.Sleep(1 * time.Minute)
 
-		gotStatus := getRunnerJobStatus(r.List())
-		want := []string{"running", "running", "waiting"}
-		if diff := cmp.Diff(gotStatus, want); diff != "" {
-			t.Errorf("unexpected value (-got +want)\n%s", diff)
-		}
-
-		//// wait 11 minutes to have the firs 2 jobs finish
-		//time.Sleep(11 * time.Minute)
-		//
-		//gotStatus = getRunnerJobStatus(r.List())
-		//want = []string{"completed", "completed", "running"}
-		//if diff := cmp.Diff(gotStatus, want); diff != "" {
-		//	t.Errorf("unexpected value (-got +want)\n%s", diff)
-		//}
-
-		go func() {
-			// wait before running shutdown, this simulates a signal listener like
-			// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
-			time.Sleep(2000 * time.Minute)
-			err := r.ShutDown(context.Background())
-			if err != nil {
-				t.Errorf("unable to shut down server: %v", err)
+			gotStatus := getRunnerJobStatus(r.List())
+			// important! the want statement is correct, there must be only 2 running tasks
+			want := []string{"running", "running", "waiting", "waiting"}
+			if diff := cmp.Diff(gotStatus, want); diff != "" {
+				t.Errorf("unexpected value (-got +want)\n%s", diff)
 			}
-		}()
-		r.Wait()
+
+			// wait 11 minutes to have the firs 2 jobs finish
+			time.Sleep(11 * time.Minute)
+
+			gotStatus = getRunnerJobStatus(r.List())
+			want = []string{"complete", "complete", "running", "running"}
+			if diff := cmp.Diff(gotStatus, want); diff != "" {
+				t.Errorf("unexpected value (-got +want)\n%s", diff)
+			}
+
+			go func() {
+				// wait before running shutdown, this simulates a signal listener like
+				// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
+				time.Sleep(2000 * time.Minute)
+				err := r.ShutDown(context.Background())
+				if err != nil {
+					t.Errorf("unable to shut down server: %v", err)
+				}
+			}()
+			r.Wait()
+		})
 	})
+
 }
 
 func TestRunnerCatchPanic(t *testing.T) {

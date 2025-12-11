@@ -69,11 +69,9 @@ type QueuedTask struct {
 }
 
 func (q *Queue) Add(fn func(ctx context.Context)) (uuid.UUID, error) {
-
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
-	if q.CountStatus(TaskStatusWaiting) >= q.maxWaiting {
+	if q.countUnsafe(TaskStatusWaiting) >= q.maxWaiting {
 		return uuid.Nil, ErrQueueFull
 	}
 
@@ -115,6 +113,12 @@ func (q *Queue) List() []QueueTaskInfo {
 }
 
 func (q *Queue) HasWaiting() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.hasWaitingUnsafe()
+}
+
+func (q *Queue) hasWaitingUnsafe() bool {
 	for i, _ := range q.tasks {
 		if q.tasks[i].Status == TaskStatusWaiting {
 			return true
@@ -136,6 +140,12 @@ func (q *Queue) SetStatus(id uuid.UUID, status TaskStatus) {
 }
 
 func (q *Queue) CountStatus(status TaskStatus) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.countUnsafe(status)
+}
+
+func (q *Queue) countUnsafe(status TaskStatus) int {
 	n := 0
 	for i, _ := range q.tasks {
 		if q.tasks[i].Status == status {
@@ -147,11 +157,35 @@ func (q *Queue) CountStatus(status TaskStatus) int {
 
 var ErrTaskNotFound = errors.New("task not found")
 
+func (q *Queue) WaitAndClaimTask(ctx context.Context) (*QueuedTask, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for {
+		// Try to claim a waiting task
+		for i := range q.tasks {
+			if q.tasks[i].Status == TaskStatusWaiting {
+				q.tasks[i].Status = TaskStatusRunning
+				q.tasks[i].StartedAt = time.Now()
+				return q.tasks[i], nil
+			}
+		}
+
+		// No tasks available - wait for signal or cancellation
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			q.cond.Wait()
+		}
+	}
+}
+
 func (q *Queue) WaitForTask(ctx context.Context) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	for !q.HasWaiting() {
+	for !q.hasWaitingUnsafe() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -162,7 +196,7 @@ func (q *Queue) WaitForTask(ctx context.Context) error {
 	return nil
 }
 
-func (q *Queue) StartWaiting() (*QueuedTask, error) {
+func (q *Queue) StartTask() (*QueuedTask, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for i, _ := range q.tasks {
@@ -174,19 +208,12 @@ func (q *Queue) StartWaiting() (*QueuedTask, error) {
 	return nil, ErrTaskNotFound
 }
 
-func (q *Queue) GetFirst(status TaskStatus) (*QueuedTask, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for i, _ := range q.tasks {
-		if q.tasks[i].Status == status {
-			return q.tasks[i], nil
-		}
-	}
-	return nil, ErrTaskNotFound
-}
-
 func (q *Queue) Unlock() {
 	q.cond.Signal()
+}
+
+func (q *Queue) UnlockAll() {
+	q.cond.Broadcast()
 }
 
 func (q *Queue) Cancel() {

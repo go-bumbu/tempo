@@ -2,6 +2,7 @@ package tempo_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/go-bumbu/tempo"
 	"net"
@@ -13,7 +14,7 @@ import (
 // this is a sample on how to use tempo to start and stop multiple http servers
 // this is just a demonstration of a more complex use-case
 func TestRunMultipleHttpServers(t *testing.T) {
-	q := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 0})
+	q := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 2})
 	q.StartBg()
 
 	port1, err := GetFreePort()
@@ -23,7 +24,7 @@ func TestRunMultipleHttpServers(t *testing.T) {
 
 	// add the first server
 	_, err = q.Add(func(ctx context.Context) {
-		err = httpServer(ctx, port1)
+		err := httpServer(ctx, port1)
 		if err != nil {
 			panic(err)
 		}
@@ -38,7 +39,7 @@ func TestRunMultipleHttpServers(t *testing.T) {
 		panic(err)
 	}
 	_, err = q.Add(func(ctx context.Context) {
-		err = httpServer(ctx, port2)
+		err := httpServer(ctx, port2)
 		if err != nil {
 			panic(err)
 		}
@@ -95,7 +96,7 @@ func httpServer(ctx context.Context, port int) error {
 
 	// Wait for server to be ready or context cancellation
 	select {
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		// No error after short delay → server started
 	case err := <-serverErr:
 		panic(fmt.Errorf("server failed to start: %w", err))
@@ -118,13 +119,12 @@ func httpServer(ctx context.Context, port int) error {
 	// Check if ListenAndServe returned an error
 	select {
 	case err := <-serverErr:
-		if err != nil {
-			panic(err)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			panic(fmt.Errorf("server error: %w", err))
 		}
 	default:
 	}
-	return ctx.Err()
-
+	return nil
 }
 
 // GetFreePort asks the kernel for a free open port that is ready to use.
