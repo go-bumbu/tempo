@@ -87,7 +87,7 @@ func httpServer(ctx context.Context, port int) error {
 		}),
 	}
 
-	// Start server in goroutine
+	// Run server in goroutine
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- srv.ListenAndServe()
