@@ -17,18 +17,19 @@ func TestRunnerParallelism(t *testing.T) {
 
 	t.Run("run waitingTasks sequentially with parallelism 1", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 1, QueueSize: 10})
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 10})
 			r.StartBg()
 
 			var result []string
 			lock := sync.Mutex{}
 			for i := 1; i <= 4; i++ {
 				n := i
-				_, err := r.Add(func(ctx context.Context) {
+				_, err := r.Add(func(ctx context.Context) error {
 					lock.Lock()
 					result = append(result, strconv.Itoa(n))
 					lock.Unlock()
 					time.Sleep(10 * time.Minute)
+					return nil
 				}, strconv.Itoa(n))
 				if err != nil {
 					t.Fatal(err)
@@ -58,17 +59,18 @@ func TestRunnerParallelism(t *testing.T) {
 
 	t.Run("run all waitingTasks with parallelism 3", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 3, QueueSize: 20})
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 3, QueueSize: 20})
 			r.StartBg()
 
 			var result []string
 			lock := sync.Mutex{}
 			for i := 1; i <= 12; i++ {
-				_, err := r.Add(func(ctx context.Context) {
+				_, err := r.Add(func(ctx context.Context) error {
 					lock.Lock()
 					result = append(result, strconv.Itoa(i))
 					lock.Unlock()
 					time.Sleep(10 * time.Minute)
+					return nil
 				}, "some action")
 				if err != nil {
 					t.Fatal(err)
@@ -105,12 +107,13 @@ func TestRunnerParallelism(t *testing.T) {
 
 func TestRunnerLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 1, QueueSize: 5})
+		r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
 		r.StartBg()
 
 		// put one task into running
-		_, err := r.Add(func(ctx context.Context) {
+		_, err := r.Add(func(ctx context.Context) error {
 			time.Sleep(10 * time.Minute)
+			return nil
 		}, "some action")
 		if err != nil {
 			t.Fatal(err)
@@ -118,10 +121,11 @@ func TestRunnerLimit(t *testing.T) {
 		// let it schedule
 		time.Sleep(100 * time.Millisecond)
 
-		// fill queue up to capacity
+		// fill TaskQueue up to capacity
 		for i := 1; i <= 5; i++ {
-			_, err := r.Add(func(ctx context.Context) {
+			_, err := r.Add(func(ctx context.Context) error {
 				time.Sleep(10 * time.Minute)
+				return nil
 			}, "some action")
 			if err != nil {
 				t.Fatal(err)
@@ -129,8 +133,9 @@ func TestRunnerLimit(t *testing.T) {
 		}
 
 		// expect que full error
-		_, err = r.Add(func(ctx context.Context) {
+		_, err = r.Add(func(ctx context.Context) error {
 			time.Sleep(10 * time.Minute)
+			return nil
 		}, "some action")
 
 		if !errors.Is(err, tempo.ErrQueueFull) {
@@ -153,28 +158,29 @@ func TestRunnerLimit(t *testing.T) {
 func TestRunnerShutdown(t *testing.T) {
 	t.Run("clean shutdown, wait for waitingTasks to finish", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 10})
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 10})
 			r.StartBg()
 
 			var result []string
 			lock := sync.Mutex{}
 			for i := 1; i <= 2; i++ {
-				_, err := r.Add(func(ctx context.Context) {
+				_, err := r.Add(func(ctx context.Context) error {
 					select {
 					case <-time.After(10 * time.Minute):
 						lock.Lock()
 						result = append(result, strconv.Itoa(i))
 						lock.Unlock()
 						// finished normally
-						return
+						return nil
 					case <-ctx.Done():
 						// still take some time for shutdown
 						time.Sleep(1 * time.Minute)
 						lock.Lock()
 						result = append(result, strconv.Itoa(i))
 						lock.Unlock()
-						return
+						return nil
 					}
+
 				}, "some action")
 				if err != nil {
 					t.Fatal(err)
@@ -207,28 +213,28 @@ func TestRunnerShutdown(t *testing.T) {
 
 	t.Run("unclean shutdown waitingTasks exceed timeout", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 10})
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 10})
 			r.StartBg()
 
 			var result []string
 			lock := sync.Mutex{}
 			// create 2 waitingTasks that will not finish during the shutdown
 			for i := 1; i <= 2; i++ {
-				_, err := r.Add(func(ctx context.Context) {
+				_, err := r.Add(func(ctx context.Context) error {
 					select {
 					case <-time.After(10 * time.Minute):
 						lock.Lock()
 						result = append(result, strconv.Itoa(i))
 						lock.Unlock()
 						// finished normally
-						return
+						return nil
 					case <-ctx.Done():
 						// still take some time for shutdown
 						time.Sleep(5 * time.Minute)
 						lock.Lock()
 						result = append(result, strconv.Itoa(i))
 						lock.Unlock()
-						return
+						return nil
 					}
 				}, "some action")
 				if err != nil {
@@ -267,13 +273,14 @@ func TestRunnerShutdown(t *testing.T) {
 func TestRunnerRaceConditions(t *testing.T) {
 	t.Run("max parallelism reached", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 20})
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
 			r.StartBg()
 
 			// add 3 jobs
 			for i := 1; i <= 4; i++ {
-				_, err := r.Add(func(ctx context.Context) {
+				_, err := r.Add(func(ctx context.Context) error {
 					time.Sleep(10 * time.Minute)
+					return nil
 				}, "some action")
 				if err != nil {
 					t.Fatal(err)
@@ -316,12 +323,12 @@ func TestRunnerRaceConditions(t *testing.T) {
 
 func TestRunnerCatchPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		r := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 20})
+		r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
 		r.StartBg()
 
 		// add 3 jobs
 		for i := 1; i <= 3; i++ {
-			_, err := r.Add(func(ctx context.Context) {
+			_, err := r.Add(func(ctx context.Context) error {
 				time.Sleep(1 * time.Minute)
 				panic("panic")
 			}, "some action")
@@ -340,11 +347,10 @@ func TestRunnerCatchPanic(t *testing.T) {
 			}
 		}()
 		r.Wait()
-
 	})
 }
 
-func getRunnerJobStatus(in []tempo.QueueTaskInfo) []string {
+func getRunnerJobStatus(in []tempo.TaskInfo) []string {
 	r := []string{}
 	for _, item := range in {
 		r = append(r, item.Status.Str())

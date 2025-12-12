@@ -3,16 +3,16 @@ package tempo
 import (
 	"context"
 	"errors"
-	"github.com/davecgh/go-spew/spew"
+	"fmt"
 	"github.com/google/uuid"
 	"sync"
 )
 
 // QueueRunner is a task runner that manages task execution with parallelism control
 type QueueRunner struct {
-	queue *queue
-
-	wg sync.WaitGroup
+	TaskQueue
+	wg          sync.WaitGroup
+	parallelism int
 
 	// runtime context
 	ctx    context.Context
@@ -23,18 +23,32 @@ type QueueRunner struct {
 	stopChan chan struct{}
 }
 
+type RunnerCfg struct {
+	Parallelism int
+	QueueSize   int
+	HistorySize int
+}
+
 // NewQueueRunner creates a new QueueRunner instance
-func NewQueueRunner(cfg QueueCfg) *QueueRunner {
-	q := newQueue(cfg)
+func NewQueueRunner(cfg RunnerCfg) *QueueRunner {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &QueueRunner{
-		queue: q,
+
+	rq := QueueRunner{
+		TaskQueue: TaskQueue{
+			mu:         sync.Mutex{},
+			tasks:      []*QueuedTask{},
+			maxWaiting: cfg.QueueSize,
+			maxDone:    cfg.HistorySize,
+		},
+		parallelism: cfg.Parallelism,
 
 		ctx:    ctx,
 		cancel: cancel,
 
 		stopChan: make(chan struct{}),
 	}
+	rq.cond = sync.NewCond(&rq.mu)
+	return &rq
 }
 
 // StartBg begins processing tasks
@@ -42,41 +56,76 @@ func (r *QueueRunner) StartBg() {
 
 	r.wg.Go(func() {
 		<-r.ctx.Done()
-		// Wake up waiting workers to shutdown
-		r.queue.UnlockAll()
+		// Wake up waiting workers to shut down
+		r.UnlockAllWaiting()
 	})
 
+	// TODO add a ticker to call clean history
+
 	// Fixed worker pool - each worker loops forever
-	for i := 0; i < r.queue.maxRunning; i++ {
+	for i := 0; i < r.parallelism; i++ {
 		r.wg.Go(func() {
 			for {
-				task, err := r.queue.WaitAndClaimTask(r.ctx)
+				task, err := r.WaitAndClaimTask(r.ctx)
 				if err != nil {
 					return // Shutdown
 				}
 
 				func() {
+					childCtx, taskCancel := context.WithCancel(r.ctx)
 					defer func() {
-						if v := recover(); v != nil {
-							spew.Dump(v)
-							// TODO: set task status to failed
-							// Drop the reference to the function, so it can be GC'ed.
-							// task.data.f = nil
-							// Close the task "done" channel, so Wait() unblocks.
-							//close(task.data.done)
+						taskCancel()
+						close(task.done)
+						if recVal := recover(); recVal != nil {
+							r.mu.Lock()
+							task.Status = TaskStatusPanicked
+							task.err = fmt.Errorf("task panicked: %v", recVal)
+							r.mu.Unlock()
 						}
 					}()
-					task.Task(r.ctx)
-					r.queue.SetStatus(task.ID, TaskStatusComplete)
+					taskErr := task.Task(childCtx)
+					r.mu.Lock()
+					if err != nil {
+						task.Status = TaskStatusFailed
+						task.err = taskErr
+					} else {
+						task.Status = TaskStatusComplete
+
+					}
+					r.mu.Unlock()
 				}()
+
 			}
 		})
 	}
 }
 
-// Add adds a new task to the runner
-func (r *QueueRunner) Add(fn func(ctx context.Context), name string) (uuid.UUID, error) {
-	return r.queue.Add(fn, name)
+// todo add test
+func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
+	task, err := r.getTask(id)
+	if err != nil {
+		return err
+	}
+
+	// todo only call cancel if the task is running
+	task.cancelFn()
+
+	// Wait until task finishes OR caller's ctx times out
+	select {
+	case <-task.done:
+		// Task stopped
+		r.mu.Lock()
+		task.Status = TaskStatusCanceled
+		r.mu.Unlock()
+		return nil
+
+	case <-ctx.Done(): // timeout OR external cancel
+		r.mu.Lock()
+		task.Status = TaskStatusCanceled
+		r.mu.Unlock()
+		// Task didn't stop in time
+		return fmt.Errorf("cancel timeout: %w", ctx.Err())
+	}
 }
 
 var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")
@@ -110,9 +159,4 @@ func (r *QueueRunner) ShutDown(ctx context.Context) error {
 // Wait blocks until the runner has shut down
 func (r *QueueRunner) Wait() {
 	<-r.stopChan
-}
-
-// List returns information about all tasks
-func (r *QueueRunner) List() []QueueTaskInfo {
-	return r.queue.List()
 }

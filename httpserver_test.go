@@ -14,7 +14,7 @@ import (
 // this is a sample on how to use tempo to start and stop multiple http servers
 // this is just a demonstration of a more complex use-case
 func TestRunMultipleHttpServers(t *testing.T) {
-	q := tempo.NewQueueRunner(tempo.QueueCfg{MaxParallelism: 2, QueueSize: 2})
+	q := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 2})
 	q.StartBg()
 
 	port1, err := GetFreePort()
@@ -23,11 +23,12 @@ func TestRunMultipleHttpServers(t *testing.T) {
 	}
 
 	// add the first server
-	_, err = q.Add(func(ctx context.Context) {
+	_, err = q.Add(func(ctx context.Context) error {
 		err := httpServer(ctx, port1)
 		if err != nil {
 			panic(err)
 		}
+		return nil
 	}, "server1")
 	if err != nil {
 		t.Fatal(err)
@@ -38,11 +39,12 @@ func TestRunMultipleHttpServers(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	_, err = q.Add(func(ctx context.Context) {
+	_, err = q.Add(func(ctx context.Context) error {
 		err := httpServer(ctx, port2)
 		if err != nil {
 			panic(err)
 		}
+		return nil
 	}, "server2")
 	if err != nil {
 		t.Fatal(err)
