@@ -17,6 +17,9 @@ func newTestQueue(size int) *TaskQueue {
 	return NewTaskQueue(QueueCfg{QueueSize: size})
 }
 
+
+HERE => improve tests
+
 const myActionName = "myActionName"
 
 func dummyTask(ctx context.Context) error { return nil }
