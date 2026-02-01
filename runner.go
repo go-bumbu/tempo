@@ -57,7 +57,7 @@ func (r *QueueRunner) StartBg() {
 	r.wg.Go(func() {
 		<-r.ctx.Done()
 		// Wake up waiting workers to shut down
-		r.UnlockAllWaiting()
+		r.unlockAllWaiting()
 	})
 
 	// TODO add a ticker to call clean history
@@ -102,7 +102,7 @@ func (r *QueueRunner) StartBg() {
 
 // todo add test
 func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
-	task, err := r.getTask(id)
+	task, err := r.GetTask(id)
 	if err != nil {
 		return err
 	}

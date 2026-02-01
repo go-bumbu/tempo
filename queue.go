@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/google/uuid"
+	"slices"
 	"sync"
 	"time"
 )
@@ -135,8 +136,7 @@ func (q *TaskQueue) List() []TaskInfo {
 	return info
 }
 
-// todo add test
-func (q *TaskQueue) getTask(id uuid.UUID) (*QueuedTask, error) {
+func (q *TaskQueue) GetTask(id uuid.UUID) (*QueuedTask, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -148,19 +148,16 @@ func (q *TaskQueue) getTask(id uuid.UUID) (*QueuedTask, error) {
 	return nil, ErrTaskNotFound
 }
 
-func (q *TaskQueue) SetStatus(id uuid.UUID, status TaskStatus, err error) {
+func (q *TaskQueue) SetStatus(id uuid.UUID, status TaskStatus) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.setStatusUnsafe(id, status, err)
+	q.setStatusUnsafe(id, status)
 }
 
-func (q *TaskQueue) setStatusUnsafe(id uuid.UUID, status TaskStatus, err error) {
+func (q *TaskQueue) setStatusUnsafe(id uuid.UUID, status TaskStatus) {
 	for i := range q.tasks {
 		if q.tasks[i].id == id {
 			q.tasks[i].Status = status
-			if err != nil {
-				q.tasks[i].err = err
-			}
 			return
 		}
 	}
@@ -210,14 +207,43 @@ func (q *TaskQueue) WaitAndClaimTask(ctx context.Context) (*QueuedTask, error) {
 	}
 }
 
+var TaskTerminalStatus = []TaskStatus{
+	TaskStatusComplete,
+	TaskStatusFailed,
+	TaskStatusPanicked,
+	TaskStatusCanceled,
+}
+
 func (q *TaskQueue) CleanHistory() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	// todo
-	// itterate over all tasks, count the ones in terminal status
-	// itterate a second time and remove onlu leaving N
+
+	doneCount := 0
+	for _, task := range q.tasks {
+		if slices.Contains(TaskTerminalStatus, task.Status) {
+			doneCount++
+		}
+	}
+
+	if q.maxDone >= doneCount {
+		return
+	}
+
+	// Calculate how many old terminal tasks to skip
+	skip := doneCount - q.maxDone
+
+	// Rebuild q.tasks in-place, preserving order
+	filtered := q.tasks[:0]
+	for _, task := range q.tasks {
+		if slices.Contains(TaskTerminalStatus, task.Status) && skip > 0 {
+			skip--
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	q.tasks = filtered
 }
 
-func (q *TaskQueue) UnlockAllWaiting() {
+func (q *TaskQueue) unlockAllWaiting() {
 	q.cond.Broadcast()
 }

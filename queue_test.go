@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
@@ -16,9 +17,6 @@ import (
 func newTestQueue(size int) *TaskQueue {
 	return NewTaskQueue(QueueCfg{QueueSize: size})
 }
-
-
-HERE => improve tests
 
 const myActionName = "myActionName"
 
@@ -133,12 +131,164 @@ func TestQueueList(t *testing.T) {
 	}
 }
 
+func TestQueueGetTask(t *testing.T) {
+	tq := newTestQueue(10)
+
+	// Add tasks and verify
+	for i := 0; i < 3; i++ {
+		_, _ = tq.Add(dummyTask, myActionName)
+	}
+
+	tasks := tq.List()
+	if len(tasks) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(tasks))
+	}
+
+	t.Run("get existing task", func(t *testing.T) {
+		task, err := tq.GetTask(tasks[0].ID)
+		if err != nil {
+			t.Fatalf("unexected error getting task %d: %v", tasks[0].ID, err)
+		}
+
+		// verify tasks fields
+		if task.Status != TaskStatusWaiting {
+			t.Errorf("expected waiting status, got %v", task.Status)
+		}
+		if task.id == uuid.Nil {
+			t.Errorf("unexpected task nil UUID")
+		}
+		if task.QueuedAt.IsZero() {
+			t.Errorf("zero QueuedAt time")
+		}
+	})
+
+	t.Run("error on nonexistent task", func(t *testing.T) {
+		randomUID := uuid.Must(uuid.NewRandom())
+		_, err := tq.GetTask(randomUID)
+		if !errors.Is(err, ErrTaskNotFound) {
+			t.Errorf("expected ErrTaskNotFound, got: %v", err)
+		}
+	})
+}
+
+func TestQueueCleanHistory(t *testing.T) {
+	makeTask := func(id int, status TaskStatus) *QueuedTask {
+		return &QueuedTask{
+			id:     uuid.New(),
+			Status: status,
+			name:   fmt.Sprintf("task-%d", id),
+		}
+	}
+
+	t.Run("no terminal tasks", func(t *testing.T) {
+		tq := newTestQueue(10)
+		tq.tasks = []*QueuedTask{
+			makeTask(1, TaskStatusWaiting),
+			makeTask(2, TaskStatusRunning),
+		}
+		tq.maxDone = 1
+
+		tq.CleanHistory()
+		if len(tq.tasks) != 2 {
+			t.Errorf("expected 2 tasks, got %d", len(tq.tasks))
+		}
+	})
+
+	t.Run("less than maxDone terminal tasks", func(t *testing.T) {
+		tq := newTestQueue(10)
+		tq.tasks = []*QueuedTask{
+			makeTask(1, TaskStatusComplete),
+			makeTask(2, TaskStatusWaiting),
+			makeTask(3, TaskStatusPanicked),
+		}
+		tq.maxDone = 3
+
+		tq.CleanHistory()
+		if len(tq.tasks) != 3 {
+			t.Errorf("expected 2 tasks, got %d", len(tq.tasks))
+		}
+	})
+
+	t.Run("more than maxDone terminal tasks", func(t *testing.T) {
+		tq := newTestQueue(10)
+		tq.tasks = []*QueuedTask{
+			makeTask(1, TaskStatusComplete),
+			makeTask(2, TaskStatusComplete),
+			makeTask(3, TaskStatusPanicked),
+			makeTask(4, TaskStatusWaiting),
+			makeTask(5, TaskStatusComplete),
+		}
+		tq.maxDone = 2
+
+		tq.CleanHistory()
+
+		// Count terminal tasks
+		doneCount := 0
+		for _, task := range tq.tasks {
+			if slices.Contains(TaskTerminalStatus, task.Status) {
+				doneCount++
+			}
+		}
+		if doneCount != tq.maxDone {
+			t.Errorf("expected %d terminal tasks, got %d", tq.maxDone, doneCount)
+		}
+
+		// Verify order preserved
+		want := []TaskStatus{TaskStatusPanicked, TaskStatusWaiting, TaskStatusComplete}
+		gotOrder := []TaskStatus{}
+		for _, task := range tq.tasks {
+			gotOrder = append(gotOrder, task.Status)
+		}
+
+		if diff := cmp.Diff(gotOrder, want); diff != "" {
+			t.Errorf("unexpected value (-got +want)\n%s", diff)
+		}
+	})
+
+	t.Run("mix of terminal and non-terminal tasks preserves order", func(t *testing.T) {
+		tq := newTestQueue(10)
+		tq.tasks = []*QueuedTask{
+			makeTask(1, TaskStatusComplete),
+			makeTask(2, TaskStatusRunning),
+			makeTask(3, TaskStatusFailed),
+			makeTask(4, TaskStatusWaiting),
+			makeTask(5, TaskStatusPanicked),
+			makeTask(6, TaskStatusRunning),
+		}
+		tq.maxDone = 2
+
+		tq.CleanHistory()
+
+		// Count terminal tasks
+		doneCount := 0
+		for _, task := range tq.tasks {
+			if slices.Contains(TaskTerminalStatus, task.Status) {
+				doneCount++
+			}
+		}
+		if doneCount != tq.maxDone {
+			t.Errorf("expected %d terminal tasks, got %d", tq.maxDone, doneCount)
+		}
+
+		// Verify order preserved
+		want := []TaskStatus{TaskStatusRunning, TaskStatusFailed, TaskStatusWaiting, TaskStatusPanicked, TaskStatusRunning}
+		gotOrder := []TaskStatus{}
+		for _, task := range tq.tasks {
+			gotOrder = append(gotOrder, task.Status)
+		}
+
+		if diff := cmp.Diff(gotOrder, want); diff != "" {
+			t.Errorf("unexpected value (-got +want)\n%s", diff)
+		}
+	})
+}
+
 func TestQueueUnlock(t *testing.T) {
 	tq := newTestQueue(10)
 
 	// Multiple unlocks should not panic
-	tq.UnlockAllWaiting()
-	tq.UnlockAllWaiting()
+	tq.unlockAllWaiting()
+	tq.unlockAllWaiting()
 
 	// TaskQueue should still work
 	if _, err := tq.Add(dummyTask, myActionName); err != nil {
@@ -154,7 +304,7 @@ func TestQueueUnlock(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 	_, _ = tq.Add(dummyTask, myActionName)
-	tq.UnlockAllWaiting()
+	tq.unlockAllWaiting()
 
 	select {
 	case err := <-done:
@@ -215,9 +365,9 @@ func TestQueueConcurrency(t *testing.T) {
 			go func(taskID uuid.UUID, idx int) {
 				defer wg.Done()
 				if idx%2 == 0 {
-					tq.SetStatus(taskID, TaskStatusRunning, nil)
+					tq.SetStatus(taskID, TaskStatusRunning)
 				} else {
-					tq.SetStatus(taskID, TaskStatusComplete, nil)
+					tq.SetStatus(taskID, TaskStatusComplete)
 				}
 			}(id, i)
 		}
@@ -291,7 +441,7 @@ func TestQueueEdgeCases(t *testing.T) {
 	})
 }
 
-func TestQueueIntegration(t *testing.T) {
+func TestQueueEE2E(t *testing.T) {
 	t.Run("complete workflow", func(t *testing.T) {
 		tq := newTestQueue(20)
 
