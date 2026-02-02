@@ -4,40 +4,41 @@ import (
 	"context"
 	"errors"
 	"github.com/google/uuid"
+	"slices"
 	"sync"
 	"time"
 )
 
-type Queue struct {
+// TaskQueue Allows to manage the lifecycle of tasks in a queue: add tasks to the queue,
+// change the status, get the status etc. It is not responsible for running the tasks or to handle the task.
+// it is generally threadsafe except explicit unsafe methods.
+type TaskQueue struct {
 	mu    sync.Mutex
 	cond  *sync.Cond
 	tasks []*QueuedTask // ideally to avoid iterators this should be a sorted map
 
 	maxWaiting int
-	maxRunning int
 	maxDone    int
 }
 
 type QueueCfg struct {
-	QueueSize      int
-	MaxParallelism int
-	HistorySize    int
+	QueueSize   int
+	HistorySize int // todo clean history data
 }
 
-func NewQueue(cfg QueueCfg) *Queue {
-	t := Queue{
+func NewTaskQueue(cfg QueueCfg) *TaskQueue {
+	t := TaskQueue{
 		mu:    sync.Mutex{},
 		tasks: []*QueuedTask{},
 
 		maxWaiting: cfg.QueueSize,
-		maxRunning: cfg.MaxParallelism,
 		maxDone:    cfg.HistorySize,
 	}
 	t.cond = sync.NewCond(&t.mu)
 	return &t
 }
 
-var ErrQueueFull = errors.New("queue full")
+var ErrQueueFull = errors.New("TaskQueue full")
 
 type TaskStatus int
 
@@ -46,7 +47,9 @@ const (
 	TaskStatusRunning
 	TaskStatusComplete
 	TaskStatusFailed
+	TaskStatusPanicked
 	TaskStatusCanceled
+	TaskStatusCancelError
 )
 
 func (s TaskStatus) Str() string {
@@ -59,98 +62,117 @@ func (s TaskStatus) Str() string {
 		return "complete"
 	case TaskStatusFailed:
 		return "failed"
+	case TaskStatusPanicked:
+		return "panicked"
 	case TaskStatusCanceled:
 		return "canceled"
+	case TaskStatusCancelError:
+		return "cancel_error"
 	default:
 		return "unknown"
 	}
 }
 
 type QueuedTask struct {
-	ID        uuid.UUID                 // Unique identifier for the task
-	Task      func(ctx context.Context) // The actual task (for simple functions)
-	Status    TaskStatus
-	QueuedAt  time.Time // When it was added to queue
-	StartedAt time.Time // When it started running
+	id     uuid.UUID
+	name   string
+	Run    func(ctx context.Context) error
+	Status TaskStatus
+	err    error
+
+	QueuedAt  time.Time
+	StartedAt time.Time
+	EndedAt   time.Time
+
+	// handle the individual task
+	done     chan struct{}
+	cancelFn context.CancelFunc
 }
 
-func (q *Queue) Add(fn func(ctx context.Context)) (uuid.UUID, error) {
+func (q *TaskQueue) Add(fn func(ctx context.Context) error, name string) (uuid.UUID, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.countUnsafe(TaskStatusWaiting) >= q.maxWaiting {
+	if q.countStatusUnsafe(TaskStatusWaiting) >= q.maxWaiting {
 		return uuid.Nil, ErrQueueFull
 	}
 
 	id := uuid.New()
 	q.tasks = append(q.tasks, &QueuedTask{
-		ID:        id,
-		Task:      fn,
+		id:        id,
+		name:      name,
+		Run:       fn,
 		Status:    TaskStatusWaiting,
 		QueuedAt:  time.Now(),
 		StartedAt: time.Time{},
+		done:      make(chan struct{}),
 	})
 
 	q.cond.Signal()
 	return id, nil
 }
 
-type QueueTaskInfo struct {
+type TaskInfo struct {
 	ID        uuid.UUID
+	Name      string
 	Status    TaskStatus
 	QueuedAt  time.Time
 	StartedAt time.Time
+	EndedAt   time.Time
 }
 
-func (q *Queue) List() []QueueTaskInfo {
+func (q *TaskQueue) List() []TaskInfo {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	var info []QueueTaskInfo
+	var info []TaskInfo
 	for _, task := range q.tasks {
-		qt := QueueTaskInfo{
-			ID:        task.ID,
+		qt := TaskInfo{
+			ID:        task.id,
+			Name:      task.name,
 			Status:    task.Status,
 			QueuedAt:  task.QueuedAt,
 			StartedAt: task.StartedAt,
+			EndedAt:   task.EndedAt,
 		}
 		info = append(info, qt)
 	}
 	return info
 }
 
-func (q *Queue) HasWaiting() bool {
+func (q *TaskQueue) GetTask(id uuid.UUID) (*QueuedTask, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.hasWaitingUnsafe()
-}
 
-func (q *Queue) hasWaitingUnsafe() bool {
 	for i := range q.tasks {
-		if q.tasks[i].Status == TaskStatusWaiting {
-			return true
+		if q.tasks[i].id == id {
+			return q.tasks[i], nil
 		}
 	}
-	return false
+	return nil, ErrTaskNotFound
 }
 
-func (q *Queue) SetStatus(id uuid.UUID, status TaskStatus) {
+func (q *TaskQueue) SetStatus(id uuid.UUID, status TaskStatus) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.setStatusUnsafe(id, status)
+}
+
+func (q *TaskQueue) setStatusUnsafe(id uuid.UUID, status TaskStatus) {
 	for i := range q.tasks {
-		if q.tasks[i].ID == id {
+		if q.tasks[i].id == id {
 			q.tasks[i].Status = status
 			return
 		}
 	}
 }
 
-func (q *Queue) CountStatus(status TaskStatus) int {
+func (q *TaskQueue) CountStatus(status TaskStatus) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.countUnsafe(status)
+	return q.countStatusUnsafe(status)
 }
 
-func (q *Queue) countUnsafe(status TaskStatus) int {
+func (q *TaskQueue) countStatusUnsafe(status TaskStatus) int {
 	n := 0
 	for i := range q.tasks {
 		if q.tasks[i].Status == status {
@@ -162,7 +184,9 @@ func (q *Queue) countUnsafe(status TaskStatus) int {
 
 var ErrTaskNotFound = errors.New("task not found")
 
-func (q *Queue) WaitAndClaimTask(ctx context.Context) (*QueuedTask, error) {
+// WaitAndClaimTask blocks the execution until either the context is canceled or
+// a new task can be executed, in the later case a pointer to the task is returned
+func (q *TaskQueue) WaitAndClaimTask(ctx context.Context) (*QueuedTask, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -186,37 +210,43 @@ func (q *Queue) WaitAndClaimTask(ctx context.Context) (*QueuedTask, error) {
 	}
 }
 
-func (q *Queue) WaitForTask(ctx context.Context) error {
+var TaskTerminalStatus = []TaskStatus{
+	TaskStatusComplete,
+	TaskStatusFailed,
+	TaskStatusPanicked,
+	TaskStatusCanceled,
+}
+
+func (q *TaskQueue) CleanHistory() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	for !q.hasWaitingUnsafe() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			q.cond.Wait()
+	doneCount := 0
+	for _, task := range q.tasks {
+		if slices.Contains(TaskTerminalStatus, task.Status) {
+			doneCount++
 		}
 	}
-	return nil
-}
 
-func (q *Queue) StartTask() (*QueuedTask, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for i := range q.tasks {
-		if q.tasks[i].Status == TaskStatusWaiting {
-			q.tasks[i].Status = TaskStatusRunning
-			return q.tasks[i], nil
-		}
+	if q.maxDone >= doneCount {
+		return
 	}
-	return nil, ErrTaskNotFound
+
+	// Calculate how many old terminal tasks to skip
+	skip := doneCount - q.maxDone
+
+	// Rebuild q.tasks in-place, preserving order
+	filtered := q.tasks[:0]
+	for _, task := range q.tasks {
+		if slices.Contains(TaskTerminalStatus, task.Status) && skip > 0 {
+			skip--
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	q.tasks = filtered
 }
 
-func (q *Queue) Unlock() {
-	q.cond.Signal()
-}
-
-func (q *Queue) UnlockAll() {
+func (q *TaskQueue) unlockAllWaiting() {
 	q.cond.Broadcast()
 }

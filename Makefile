@@ -10,7 +10,7 @@ test: ## run fast go tests
 	@go test ./...
 
 test-race: ## run go full tests with race test
-	@go test ./... -race -count 6
+	@go test ./... -race -count 10
 
 lint: ## run go linter
 	@# depends on https://github.com/golangci/golangci-lint
@@ -37,6 +37,7 @@ coverage: ## check code coverage numbers
 		coverage=$$(go tool cover -func=coverage.out | grep total: | awk '{print $$3}' | sed 's/%//'); \
 		if [ $$(echo "$$coverage < $(COVERAGE_THRESHOLD)" | bc -l) -eq 1 ]; then \
 			echo "❌ Test coverage is below $(COVERAGE_THRESHOLD)%! Actual: $$coverage%"; \
+			rm -f coverage.out; \
 			exit 1; \
 		else \
 			echo "✅ Test coverage is $$coverage%"; \
