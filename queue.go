@@ -49,6 +49,7 @@ const (
 	TaskStatusFailed
 	TaskStatusPanicked
 	TaskStatusCanceled
+	TaskStatusCancelError
 )
 
 func (s TaskStatus) Str() string {
@@ -65,6 +66,8 @@ func (s TaskStatus) Str() string {
 		return "panicked"
 	case TaskStatusCanceled:
 		return "canceled"
+	case TaskStatusCancelError:
+		return "cancel_error"
 	default:
 		return "unknown"
 	}
@@ -73,7 +76,7 @@ func (s TaskStatus) Str() string {
 type QueuedTask struct {
 	id     uuid.UUID
 	name   string
-	Task   func(ctx context.Context) error
+	Run    func(ctx context.Context) error
 	Status TaskStatus
 	err    error
 
@@ -97,7 +100,7 @@ func (q *TaskQueue) Add(fn func(ctx context.Context) error, name string) (uuid.U
 	q.tasks = append(q.tasks, &QueuedTask{
 		id:        id,
 		name:      name,
-		Task:      fn,
+		Run:       fn,
 		Status:    TaskStatusWaiting,
 		QueuedAt:  time.Now(),
 		StartedAt: time.Time{},

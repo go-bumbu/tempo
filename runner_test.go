@@ -3,6 +3,7 @@ package tempo_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/go-bumbu/tempo"
 	"github.com/google/go-cmp/cmp"
 	"sort"
@@ -358,9 +359,226 @@ func getRunnerJobStatus(in []tempo.TaskInfo) []string {
 	return r
 }
 
-// TODO, test for:
+//nolint:gocyclo // test should be easy to read
+func TestRunnerCancel(t *testing.T) {
+	t.Run("cancel waiting task", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 20})
+			r.StartBg()
 
-// cancel single job
+			fn := func(ctx context.Context) error {
+				timer := time.NewTimer(time.Hour * 10)
+				defer timer.Stop()
+
+				select {
+				case <-ctx.Done():
+					// return early
+					return nil
+				case <-timer.C:
+					return nil
+				}
+			}
+
+			_, err := r.Add(fn, "running task")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			id, err := r.Add(fn, "waiting task")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			time.Sleep(3 * time.Minute)
+
+			err = r.Cancel(t.Context(), id)
+			if err != nil {
+				t.Fatalf("unable to cancel job: %v", err)
+			}
+
+			task, err := r.GetTask(id)
+			if err != nil {
+				t.Fatalf("unable to get task: %v", err)
+			}
+			if task.Status != tempo.TaskStatusCanceled {
+				t.Errorf("expecting task to be in status %s but got %s", tempo.TaskStatusCanceled.Str(), task.Status.Str())
+			}
+
+			go func() {
+				// wait before running shutdown, this simulates a signal listener like
+				// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
+				time.Sleep(2000 * time.Minute)
+				err := r.ShutDown(context.Background())
+				if err != nil {
+					t.Errorf("unable to shut down server: %v", err)
+				}
+			}()
+			r.Wait()
+		})
+	})
+
+	t.Run("clean stop of running task", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
+			r.StartBg()
+
+			msgs := []string{}
+			lock := sync.Mutex{}
+
+			// a job that does something every minute, and does a shutdown when the context id canceled
+			fn := func(ctx context.Context) error {
+				ticker := time.NewTicker(time.Minute)
+				defer ticker.Stop()
+
+				i := 1
+				for {
+					select {
+					case <-ctx.Done():
+						lock.Lock()
+						msgs = append(msgs, "clean shutdown")
+						lock.Unlock()
+
+						return nil
+					case <-ticker.C:
+						lock.Lock()
+						msgs = append(msgs, fmt.Sprintf("msg %d", i))
+						lock.Unlock()
+						i++
+					}
+				}
+			}
+
+			id, err := r.Add(fn, "timeout_fn")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			time.Sleep(3 * time.Minute)
+
+			err = r.Cancel(t.Context(), id)
+			if err != nil {
+				t.Fatalf("unable to cancel job: %v", err)
+			}
+
+			task, err := r.GetTask(id)
+			if err != nil {
+				t.Fatalf("unable to get task: %v", err)
+			}
+			if task.Status != tempo.TaskStatusCanceled {
+				t.Errorf("expecting task to be in status %s but got %s", tempo.TaskStatusCanceled.Str(), task.Status.Str())
+			}
+
+			go func() {
+				// wait before running shutdown, this simulates a signal listener like
+				// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
+				time.Sleep(2000 * time.Minute)
+				err := r.ShutDown(context.Background())
+				if err != nil {
+					t.Errorf("unable to shut down server: %v", err)
+				}
+			}()
+			r.Wait()
+
+			want := []string{
+				"msg 1", "msg 2", "msg 3", "clean shutdown",
+			}
+			lock.Lock()
+			got := msgs
+			lock.Unlock()
+			if diff := cmp.Diff(got, want); diff != "" {
+				t.Errorf("unexpected value (-got +want)\n%s", diff)
+			}
+		})
+	})
+
+	t.Run("cancel task error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
+			r.StartBg()
+
+			msgs := []string{}
+			lock := sync.Mutex{}
+
+			taskDone := make(chan any, 1) // done chan to avoid test errors
+
+			// a job that does something every minute, and does a shutdown when the context id canceled
+			fn := func(ctx context.Context) error {
+				ticker := time.NewTicker(time.Minute)
+				defer ticker.Stop()
+
+				i := 1
+				for {
+					select {
+					case <-ctx.Done():
+						lock.Lock()
+						msgs = append(msgs, "received shutdown, but ignoring it")
+						lock.Unlock()
+
+						// we ignore the context termination
+						<-taskDone
+						return nil
+
+					case <-ticker.C:
+						lock.Lock()
+						msgs = append(msgs, fmt.Sprintf("msg %d", i))
+						lock.Unlock()
+						i++
+					}
+				}
+			}
+
+			id, err := r.Add(fn, "timeout_fn")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			time.Sleep(3 * time.Minute)
+
+			timeoutCtx, cfn := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cfn()
+
+			err = r.Cancel(timeoutCtx, id)
+			if err == nil {
+				t.Errorf("expecting cancel error")
+			}
+
+			task, err := r.GetTask(id)
+			if err != nil {
+				t.Fatalf("unable to get task: %v", err)
+			}
+			if task.Status != tempo.TaskStatusCancelError {
+				t.Errorf("expecting task to be in status %s but got %s", tempo.TaskStatusCancelError.Str(), task.Status.Str())
+			}
+
+			go func() {
+				// wait before running shutdown, this simulates a signal listener like
+				// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
+				time.Sleep(2000 * time.Minute)
+
+				shutdownTimeout, cfn := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cfn()
+				err := r.ShutDown(shutdownTimeout)
+				if err == nil {
+					t.Errorf("expecting shutdown timeout error")
+				}
+			}()
+			r.Wait()
+
+			want := []string{
+				"msg 1", "msg 2", "msg 3", "received shutdown, but ignoring it",
+			}
+			lock.Lock()
+			got := msgs
+			lock.Unlock()
+			if diff := cmp.Diff(got, want); diff != "" {
+				t.Errorf("unexpected value (-got +want)\n%s", diff)
+			}
+			// close the hung routine before exiting the test
+			taskDone <- struct{}{}
+
+		})
+	})
+}
+
 // test throw error if task is added before the shceduler was stareted
 // get job staus after completion => ok, error, panic
-// set name of the task

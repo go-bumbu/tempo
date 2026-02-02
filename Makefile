@@ -10,7 +10,7 @@ test: ## run fast go tests
 	@go test ./...
 
 test-race: ## run go full tests with race test
-	@go test ./... -race -count 6
+	@go test ./... -race -count 10
 
 lint: ## run go linter
 	@# depends on https://github.com/golangci/golangci-lint

@@ -83,14 +83,20 @@ func (r *QueueRunner) StartBg() {
 							r.mu.Unlock()
 						}
 					}()
-					taskErr := task.Task(childCtx)
+					// set the cancel function
+					r.mu.Lock()
+					task.cancelFn = taskCancel
+					r.mu.Unlock()
+
+					// call the task
+					taskErr := task.Run(childCtx)
+					// handle the task error
 					r.mu.Lock()
 					if err != nil {
 						task.Status = TaskStatusFailed
 						task.err = taskErr
 					} else {
 						task.Status = TaskStatusComplete
-
 					}
 					r.mu.Unlock()
 				}()
@@ -106,26 +112,44 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
+	r.mu.Lock()
+	status := task.Status
+	r.mu.Unlock()
 
-	// todo only call cancel if the task is running
-	task.cancelFn()
-
-	// Wait until task finishes OR caller's ctx times out
-	select {
-	case <-task.done:
-		// Task stopped
+	switch status {
+	case TaskStatusWaiting:
 		r.mu.Lock()
 		task.Status = TaskStatusCanceled
 		r.mu.Unlock()
 		return nil
-
-	case <-ctx.Done(): // timeout OR external cancel
+	case TaskStatusRunning:
 		r.mu.Lock()
-		task.Status = TaskStatusCanceled
+		task.cancelFn()
 		r.mu.Unlock()
-		// Task didn't stop in time
-		return fmt.Errorf("cancel timeout: %w", ctx.Err())
+		// Wait until task finishes OR caller's ctx times out
+		select {
+		case <-task.done:
+			// Run stopped
+			r.mu.Lock()
+			task.Status = TaskStatusCanceled
+			r.mu.Unlock()
+			return nil
+
+		// if we get into this situation, a task implementation is doing bad things
+		// we keep this in place so that a caller of the library might be able to log and alert upon
+		// NOTE in this situation the task keeps running
+		case <-ctx.Done():
+			r.mu.Lock()
+			task.Status = TaskStatusCancelError
+			r.mu.Unlock()
+			// Run didn't stop in time
+			return fmt.Errorf("cancel timeout: %w", ctx.Err())
+		}
+	default:
+		// todo error?
+		return fmt.Errorf("unknown task status: %v", task.Status.Str())
 	}
+
 }
 
 var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")

@@ -7,14 +7,77 @@ import (
 	"github.com/go-bumbu/tempo"
 	"net"
 	"net/http"
-	"testing"
 	"time"
 )
 
-// this is a sample on how to use tempo to start and stop multiple http servers
-// this is just a demonstration of a more complex use-case
-func TestRunMultipleHttpServers(t *testing.T) {
-	q := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 2})
+// ExampleQueueRunner is a basic example on how to use the queue runner
+func ExampleQueueRunner() {
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Printf("Example 'ExampleQueueRunner' failed due to error :%v", err)
+		}
+	}()
+
+	qrun := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 2,
+		QueueSize:   10,
+		HistorySize: 10,
+	})
+
+	// start in the background
+	qrun.StartBg()
+
+	// the task function
+	fn := func(name string) func(context.Context) error {
+		return func(ctx context.Context) error {
+			fmt.Printf("Executing task: %s\n", name)
+			return nil
+		}
+	}
+	// add the task to be processed
+	for i := range 5 {
+		name := fmt.Sprintf("task_%d", i)
+		_, err := qrun.Add(fn(name), name)
+		if err != nil {
+			panic(err)
+		}
+		// add small delay to ensure execution order
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// clean shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := qrun.ShutDown(shutdownCtx)
+	if err != nil {
+		panic(err)
+	}
+
+	// output:
+	//Executing task: task_0
+	//Executing task: task_1
+	//Executing task: task_2
+	//Executing task: task_3
+	//Executing task: task_4
+}
+
+// ExampleQueueRunner_runHttpServer is a more complex scenario that showcases how to use the queue runner
+// to start 2 http servers, and do a clean shutdown of both
+func ExampleQueueRunner_runHttpServer() {
+
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Printf("Example 'ExampleQueueRunner' failed due to error :%v", err)
+		}
+	}()
+
+	q := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 2,
+		QueueSize:   2,
+	})
+
+	// start in the background
 	q.StartBg()
 
 	port1, err := GetFreePort()
@@ -31,7 +94,7 @@ func TestRunMultipleHttpServers(t *testing.T) {
 		return nil
 	}, "server1")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	// add the second server
@@ -47,7 +110,7 @@ func TestRunMultipleHttpServers(t *testing.T) {
 		return nil
 	}, "server2")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 
 	// give the servers some time to start
@@ -56,30 +119,41 @@ func TestRunMultipleHttpServers(t *testing.T) {
 	// test that they are reachable by http
 	err = testHttpRequest(port1)
 	if err != nil {
-		t.Errorf("server should be stoped after shutdown")
+		panic(fmt.Sprintf("unable to connect to server 1: %v", err))
 	}
 	err = testHttpRequest(port2)
 	if err != nil {
-		t.Errorf("unable to contact server: %v", err)
+		panic(fmt.Sprintf("unable to connect to server 2: %v", err))
+	}
+
+	// list all tasks
+	tasks := q.List()
+	for _, task := range tasks {
+		fmt.Printf("task \"%s\" in status %s\n", task.Name, task.Status.Str())
 	}
 
 	err = q.ShutDown(context.Background())
 	if err != nil {
-		t.Errorf("unable to contact server: %v", err)
+		panic(fmt.Sprintf("error shutting down server: %v", err))
 	}
 
 	// test that they are NOT reachable by http after shutdown
 	err = testHttpRequest(port1)
 	if err == nil {
-		t.Errorf("server should be stoped after shutdown")
+		panic("server should be stopped after shutdown")
 	}
 	err = testHttpRequest(port2)
 	if err == nil {
-		t.Errorf("server should be stoped after shutdown")
+		panic("server should be stopped after shutdown")
 	}
 
+	// output:
+	//task "server1" in status running
+	//task "server2" in status running
 }
 
+// httpServer is a small helper function that stars a dummy http server on the given port
+// if the context is terminated, it will shut down the server
 func httpServer(ctx context.Context, port int) error {
 
 	srv := http.Server{
