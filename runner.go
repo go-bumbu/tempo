@@ -13,8 +13,9 @@ import (
 // QueueRunner is a task runner that manages task execution with parallelism control
 type QueueRunner struct {
 	TaskQueue
-	wg          sync.WaitGroup
-	parallelism int
+	wg           sync.WaitGroup
+	parallelism  int
+	cleanupTimer time.Duration
 
 	// runtime context
 	ctx    context.Context
@@ -26,14 +27,22 @@ type QueueRunner struct {
 }
 
 type RunnerCfg struct {
-	Parallelism int
-	QueueSize   int
-	HistorySize int
+	Parallelism  int
+	QueueSize    int
+	HistorySize  int
+	CleanupTimer time.Duration
 }
 
 // NewQueueRunner creates a new QueueRunner instance
 func NewQueueRunner(cfg RunnerCfg) *QueueRunner {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	if cfg.CleanupTimer == 0 {
+		cfg.CleanupTimer = 5 * time.Minute
+	}
+	if cfg.HistorySize == 0 {
+		cfg.HistorySize = 10
+	}
 
 	rq := QueueRunner{
 		TaskQueue: TaskQueue{
@@ -42,7 +51,8 @@ func NewQueueRunner(cfg RunnerCfg) *QueueRunner {
 			maxWaiting: cfg.QueueSize,
 			maxDone:    cfg.HistorySize,
 		},
-		parallelism: cfg.Parallelism,
+		parallelism:  cfg.Parallelism,
+		cleanupTimer: cfg.CleanupTimer,
 
 		ctx:    ctx,
 		cancel: cancel,
@@ -62,7 +72,8 @@ func (r *QueueRunner) StartBg() {
 		r.unlockAllWaiting()
 	})
 
-	// TODO add a ticker to call clean history
+	// run cleanup function in the background
+	go r.autoClean()
 
 	// Fixed worker pool - each worker loops forever
 	for i := 0; i < r.parallelism; i++ {
@@ -97,14 +108,29 @@ func (r *QueueRunner) StartBg() {
 					if err != nil {
 						task.Status = TaskStatusFailed
 						task.err = taskErr
+						task.EndedAt = time.Now()
 					} else {
 						task.Status = TaskStatusComplete
+						task.EndedAt = time.Now()
 					}
 					r.mu.Unlock()
 				}()
 
 			}
 		})
+	}
+}
+
+func (r *QueueRunner) autoClean() {
+	ticker := time.NewTicker(r.cleanupTimer)
+	for {
+		select {
+		case <-ticker.C:
+			r.CleanHistory()
+		case <-r.stopChan:
+			// stop signal received, exit the goroutine
+			return
+		}
 	}
 }
 

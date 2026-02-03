@@ -13,8 +13,53 @@ import (
 
 	"github.com/go-bumbu/tempo"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
+func TestTaskData(t *testing.T) {
+
+	synctest.Test(t, func(t *testing.T) {
+		r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 3, QueueSize: 20})
+		r.StartBg()
+
+		// put one task into running
+		_, err := r.Add(func(ctx context.Context) error {
+			time.Sleep(10 * time.Minute)
+			return nil
+		}, "some action")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// let it schedule
+		time.Sleep(100 * time.Millisecond)
+
+		err = r.ShutDown(context.Background())
+		if err != nil {
+			t.Fatalf("unable to shut down server: %v", err)
+		}
+		want := tempo.TaskInfo{
+			Name:      "some action",
+			Status:    tempo.TaskStatusComplete,
+			QueuedAt:  getTime("2000-01-01 01:00:00 +0100 CET"),
+			StartedAt: getTime("2000-01-01 01:00:00 +0100 CET"),
+			EndedAt:   getTime("2000-01-01 01:10:00 +0100 CET"),
+		}
+
+		got := r.List()
+		if diff := cmp.Diff(got[0], want, cmpopts.IgnoreFields(tempo.TaskInfo{}, "ID")); diff != "" {
+			t.Errorf("unexpected value (-got +want)\n%s", diff)
+		}
+	})
+}
+
+func getTime(in string) time.Time {
+	layout := "2006-01-02 15:04:05 -0700 MST"
+	t, err := time.Parse(layout, in)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
 func TestRunnerParallelism(t *testing.T) {
 
 	t.Run("run waitingTasks sequentially with parallelism 1", func(t *testing.T) {
@@ -49,10 +94,9 @@ func TestRunnerParallelism(t *testing.T) {
 					t.Errorf("unable to shut down server: %v", err)
 				}
 			}()
-
 			r.Wait()
-			want := []string{"1", "2", "3", "4"}
 
+			want := []string{"1", "2", "3", "4"}
 			if diff := cmp.Diff(result, want); diff != "" {
 				t.Errorf("unexpected value (-got +want)\n%s", diff)
 			}
@@ -89,10 +133,9 @@ func TestRunnerParallelism(t *testing.T) {
 					t.Errorf("unable to shut down server: %v", err)
 				}
 			}()
-
 			r.Wait()
-			want := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}
 
+			want := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}
 			// sort the result, to ensure all jobs were executed
 			sort.Slice(result, func(i, j int) bool {
 				a, _ := strconv.Atoi(result[i])
@@ -144,17 +187,121 @@ func TestRunnerLimit(t *testing.T) {
 			t.Errorf("expect err to be tempo.ErrQueueFull but got %v", err)
 		}
 
-		go func() {
-			// wait before running shutdown, this simulates a signal listener like
-			// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
-			time.Sleep(2000 * time.Minute)
-			err = r.ShutDown(context.Background())
-			if err != nil {
-				t.Errorf("unable to shut down server: %v", err)
-			}
-		}()
-		r.Wait()
+		err = r.ShutDown(context.Background())
+		if err != nil {
+			t.Fatalf("unable to shut down server: %v", err)
+		}
+
 	})
+}
+
+func TestRunnerHistoryClean(t *testing.T) {
+	t.Run("big history", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, HistorySize: 50})
+			r.StartBg()
+
+			// Put some tasks into the queue
+			for i := 1; i <= 10; i++ {
+				_, err := r.Add(func(ctx context.Context) error {
+					time.Sleep(1 * time.Minute)
+					return nil
+				}, "some action")
+				if err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(70 * time.Second)
+			}
+
+			// Put some tasks into the queue
+			for i := 1; i <= 5; i++ {
+				_, err := r.Add(func(ctx context.Context) error {
+					time.Sleep(1 * time.Minute)
+					return fmt.Errorf("fail task")
+				}, "some action")
+				if err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(70 * time.Second)
+			}
+
+			// wait for all tasks to complete
+			time.Sleep(500 * time.Minute)
+
+			tasks := r.List()
+
+			countTerminal := 0
+			for _, task := range tasks {
+				if task.Status == tempo.TaskStatusComplete || task.Status == tempo.TaskStatusFailed {
+					countTerminal++
+				}
+			}
+
+			want := 15
+			if countTerminal != want {
+				t.Errorf("unexpected amount of terminal tasks, got: %d, want %d", countTerminal, want)
+			}
+
+			err := r.ShutDown(context.Background())
+			if err != nil {
+				t.Fatalf("unable to shut down server: %v", err)
+			}
+		})
+	})
+
+	t.Run("expect clean with small history", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, HistorySize: 5})
+			r.StartBg()
+
+			// Put some tasks into the queue
+			for i := 1; i <= 10; i++ {
+				_, err := r.Add(func(ctx context.Context) error {
+					time.Sleep(1 * time.Minute)
+					return nil
+				}, "some action")
+				if err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(70 * time.Second)
+			}
+
+			// Put some tasks into the queue
+			for i := 1; i <= 5; i++ {
+				_, err := r.Add(func(ctx context.Context) error {
+					time.Sleep(1 * time.Minute)
+					return fmt.Errorf("fail task")
+				}, "some action")
+				if err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(70 * time.Second)
+			}
+
+			// wait for all tasks to complete
+			time.Sleep(500 * time.Minute)
+
+			tasks := r.List()
+
+			countTerminal := 0
+			for _, task := range tasks {
+				if task.Status == tempo.TaskStatusComplete || task.Status == tempo.TaskStatusFailed {
+					countTerminal++
+				}
+			}
+
+			want := 5
+			if countTerminal != want {
+				t.Errorf("unexpected amount of terminal tasks, got: %d, want %d", countTerminal, want)
+			}
+
+			err := r.ShutDown(context.Background())
+			if err != nil {
+				t.Fatalf("unable to shut down server: %v", err)
+			}
+		})
+	})
+
 }
 
 func TestRunnerShutdown(t *testing.T) {
@@ -275,7 +422,7 @@ func TestRunnerShutdown(t *testing.T) {
 func TestRunnerRaceConditions(t *testing.T) {
 	t.Run("max parallelism reached", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
+			r := tempo.NewQueueRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20, HistorySize: 10})
 			r.StartBg()
 
 			// add 3 jobs
