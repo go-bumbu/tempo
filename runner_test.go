@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/go-bumbu/tempo"
-	"github.com/google/go-cmp/cmp"
 	"sort"
 	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/go-bumbu/tempo"
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestRunnerParallelism(t *testing.T) {
@@ -404,6 +405,10 @@ func TestRunnerCancel(t *testing.T) {
 				t.Errorf("expecting task to be in status %s but got %s", tempo.TaskStatusCanceled.Str(), task.Status.Str())
 			}
 
+			if task.EndedAt.IsZero() {
+				t.Errorf("task end date should not be zero")
+			}
+
 			go func() {
 				// wait before running shutdown, this simulates a signal listener like
 				// signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGTERM)
@@ -466,6 +471,9 @@ func TestRunnerCancel(t *testing.T) {
 			}
 			if task.Status != tempo.TaskStatusCanceled {
 				t.Errorf("expecting task to be in status %s but got %s", tempo.TaskStatusCanceled.Str(), task.Status.Str())
+			}
+			if task.EndedAt.IsZero() {
+				t.Errorf("task end date should not be zero")
 			}
 
 			go func() {
@@ -548,6 +556,9 @@ func TestRunnerCancel(t *testing.T) {
 			}
 			if task.Status != tempo.TaskStatusCancelError {
 				t.Errorf("expecting task to be in status %s but got %s", tempo.TaskStatusCancelError.Str(), task.Status.Str())
+			}
+			if task.EndedAt.IsZero() {
+				t.Errorf("task end date should not be zero")
 			}
 
 			go func() {

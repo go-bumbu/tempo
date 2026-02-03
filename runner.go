@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
 	"sync"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 // QueueRunner is a task runner that manages task execution with parallelism control
@@ -106,7 +108,6 @@ func (r *QueueRunner) StartBg() {
 	}
 }
 
-// todo add test
 func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 	task, err := r.GetTask(id)
 	if err != nil {
@@ -120,6 +121,7 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 	case TaskStatusWaiting:
 		r.mu.Lock()
 		task.Status = TaskStatusCanceled
+		task.EndedAt = time.Now()
 		r.mu.Unlock()
 		return nil
 	case TaskStatusRunning:
@@ -132,6 +134,7 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 			// Run stopped
 			r.mu.Lock()
 			task.Status = TaskStatusCanceled
+			task.EndedAt = time.Now()
 			r.mu.Unlock()
 			return nil
 
@@ -141,6 +144,7 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 		case <-ctx.Done():
 			r.mu.Lock()
 			task.Status = TaskStatusCancelError
+			task.EndedAt = time.Now()
 			r.mu.Unlock()
 			// Run didn't stop in time
 			return fmt.Errorf("cancel timeout: %w", ctx.Err())
