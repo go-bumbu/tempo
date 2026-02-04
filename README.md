@@ -1,35 +1,72 @@
 # Tempo
 
-Tempos is a background job scheduling and control library
+Tempo is a lightweight background job runner and task queue library for Go. It provides a simple API to manage concurrent task execution with built-in support for graceful shutdown and task lifecycle management.
 
-features
- * schedule task to be executed as soon as possible, regularly or any time in the future 
- * limit parallel execution of tasks
- * task status can be queried, running and pending tasks can be canceled.
- * clean shutdown
+## Features
 
+- **Task Queue Management** - Add tasks to a queue with configurable maximum size
+- **Parallelism Control** - Limit the number of concurrent task executions
+- **Task Status Tracking** - Query task status (waiting, running, complete, failed, panicked, canceled)
+- **Task Cancellation** - Cancel running or pending tasks with timeout support
+- **Graceful Shutdown** - Clean shutdown that waits for running tasks to complete
+- **Task History** - Automatic cleanup of completed task history with configurable retention
 
-## Braindump
-for now this is only a brain dump of ideas and links
+## Installation
 
-* jobs have a type, similar to go-quarts
-* jobs can be scheduled like cron, but cron syntax is not mandatory
-* anacron like functionality is provided, figuring out the last execution is up to the job implementor
-* jobs can be monitored ( status + status message) and canceled
-* option to prevent triggering a job if previous job did not finish yet
-* use a pool to run N jobs in parallel
-* keep a log of executions
-    * classify with info, warn, error (info all good, warn corrective actions ware made, error un recoverable problem)
+```bash
+go get github.com/go-bumbu/tempo
+```
 
+## Quick Start
 
-## How to
-
-### handle shutdown in task
-
-if you have a long-running task, you might want to interrupt quickly the execution to verify if
-a shutdown was triggered ( ctx.done() ) and stop your work and clean up, this allows for clean shutdown.
 ```go
-myTask := func(ctx context.Context) {
+    // Create a runner with 2 parallel workers and queue size of 10
+    runner := tempo.NewQueueRunner(tempo.RunnerCfg{
+        Parallelism: 2, QueueSize:   10, HistorySize: 10,
+    })
+
+    // Start processing tasks in the background
+    runner.StartBg()
+
+    // Define a task
+    myTask := func(ctx context.Context) error {
+        fmt.Println("Executing task")
+        time.Sleep(100 * time.Millisecond) // Simulate work
+        return nil
+    }
+
+    // Add the task to the queue
+    _, err := runner.Add(myTask, "my-task")
+    if err != nil {
+        fmt.Printf("Failed to add task: %v\n", err)
+    }
+
+    if err := runner.ShutDown(context.TODO()); err != nil {
+        fmt.Printf("Shutdown error: %v\n", err)
+    }
+}
+```
+
+## Configuration
+
+```go
+tempo.RunnerCfg{
+    Parallelism:  4,              // Number of concurrent workers (required)
+    QueueSize:    100,            // Maximum pending tasks in queue
+    HistorySize:  50,             // Number of completed tasks to retain
+    CleanupTimer: 5 * time.Minute, // Interval for history cleanup (default: 5min)
+}
+```
+
+
+## How To
+
+### Handle Shutdown in Long-Running Tasks
+
+For long-running tasks, check the context to respond to shutdown signals and allow for clean termination:
+
+```go
+myTask := func(ctx context.Context) error {
     ticker := time.NewTicker(1 * time.Second)
     defer ticker.Stop()
     
@@ -38,7 +75,7 @@ myTask := func(ctx context.Context) {
         case <-ctx.Done():
             fmt.Println("Shutdown received, cleaning up...")
             cleanup()
-            return
+            return nil
             
         case <-ticker.C:
             // Do periodic work
@@ -46,5 +83,21 @@ myTask := func(ctx context.Context) {
         }
     }
 }
+```
 
+### Query Task Status
+
+```go
+// List all tasks
+tasks := runner.List()
+for _, task := range tasks {
+    fmt.Printf("Task %s: %s (queued: %v, started: %v)\n", 
+        task.Name, task.Status.Str(), task.QueuedAt, task.StartedAt)
+}
+
+// Get specific task
+task, err := runner.GetTask(taskID)
+if err != nil {
+    fmt.Printf("Task not found: %v\n", err)
+}
 ```
