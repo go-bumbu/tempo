@@ -79,22 +79,27 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 	return r, nil
 }
 
-// RegisterTask registers a task definition for the given name (overwrites if present).
-func (r *QueueRunner) RegisterTask(name string, def TaskDef) {
-	r.registry.add(name, def)
+// RegisterTask registers a task definition (overwrites if present). Def.Name is the task name.
+func (r *QueueRunner) RegisterTask(def TaskDef) {
+	r.registry.add(def)
 }
 
 // StartBg begins processing tasks from the store.
+// The wait group count is added upfront so ShutDown can safely call Wait without racing with Add.
 func (r *QueueRunner) StartBg() {
-	r.wg.Go(func() {
+	r.wg.Add(1 + r.parallelism)
+
+	go func() {
+		defer r.wg.Done()
 		<-r.ctx.Done()
 		r.queue.UnblockAll()
-	})
+	}()
 
 	go r.autoClean()
 
 	for i := 0; i < r.parallelism; i++ {
-		r.wg.Go(func() {
+		go func() {
+			defer r.wg.Done()
 			for {
 				canClaim := r.buildCanClaim()
 				id, name, err := r.queue.NextTask(r.ctx, canClaim)
@@ -149,7 +154,7 @@ func (r *QueueRunner) StartBg() {
 
 				_ = r.queue.SetStatus(context.Background(), id, finalStatus, time.Time{}, finalEndedAt)
 			}
-		})
+		}()
 	}
 }
 

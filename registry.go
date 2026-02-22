@@ -7,6 +7,8 @@ import (
 
 // TaskDef defines how to run a task and optional per-task behavior.
 type TaskDef struct {
+	// Name identifies the task (used for registration and enqueueing).
+	Name string
 	// Run is the function to execute for this task.
 	Run func(ctx context.Context) error
 	// MaxParallelism is the max number of this task name that may run at once.
@@ -24,19 +26,13 @@ func newTaskRegistry() *taskRegistry {
 	return &taskRegistry{tasks: make(map[string]TaskDef)}
 }
 
-func (r *taskRegistry) add(name string, def TaskDef) {
+func (r *taskRegistry) add(def TaskDef) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tasks == nil {
 		r.tasks = make(map[string]TaskDef)
 	}
-	r.tasks[name] = def
-}
-
-func (r *taskRegistry) remove(name string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.tasks, name)
+	r.tasks[def.Name] = def
 }
 
 func (r *taskRegistry) lookup(name string) (TaskDef, bool) {

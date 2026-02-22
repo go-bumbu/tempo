@@ -36,7 +36,8 @@ func ExampleQueueRunner() {
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
 		n := name
-		qrun.RegisterTask(name, tempo.TaskDef{
+		qrun.RegisterTask(tempo.TaskDef{
+			Name: name,
 			Run: func(ctx context.Context) error {
 				fmt.Printf("Executing task: %s\n", n)
 				return nil
@@ -98,15 +99,13 @@ func ExampleQueueRunner_runHttpServer() {
 	if err != nil {
 		panic(err)
 	}
-	q.RegisterTask("server1", tempo.TaskDef{
-		Run: func(ctx context.Context) error {
-			return httpServer(ctx, port1)
-		},
+	q.RegisterTask(tempo.TaskDef{
+		Name: "server1",
+		Run:  func(ctx context.Context) error { return httpServer(ctx, port1) },
 	})
-	q.RegisterTask("server2", tempo.TaskDef{
-		Run: func(ctx context.Context) error {
-			return httpServer(ctx, port2)
-		},
+	q.RegisterTask(tempo.TaskDef{
+		Name: "server2",
+		Run:  func(ctx context.Context) error { return httpServer(ctx, port2) },
 	})
 
 	q.StartBg()
@@ -159,65 +158,24 @@ func ExampleQueueRunner_runHttpServer() {
 	//task "server1" in status running
 }
 
-// ExampleRunGroup demonstrates running multiple services (two HTTP servers and a task runner)
-// in parallel and shutting them all down cleanly when a signal is received or context is done.
-func ExampleRunGroup() {
-	defer func() {
-		if err := recover(); err != nil {
-			fmt.Printf("example failed: %v", err)
-		}
-	}()
-
-	port1, _ := GetFreePort()
-	port2, _ := GetFreePort()
-
-	qr, err := tempo.NewQueueRunner(tempo.RunnerCfg{
-		Parallelism: 1,
-		QueueSize:   2,
-		HistorySize: 5,
-		Persistence: tempo.NewMemPersistence(),
-	})
-	if err != nil {
-		panic(err)
-	}
-	qr.RegisterTask("worker", tempo.TaskDef{
+// ExampleGroupRunner demonstrates the config-free API: NewGroupRunner(), Add(TaskDef), Run(), Stop(ctx).
+func ExampleGroupRunner() {
+	rg := tempo.NewGroupRunner()
+	rg.Add(tempo.TaskDef{
+		Name: "worker",
 		Run: func(ctx context.Context) error {
 			<-ctx.Done()
 			return ctx.Err()
 		},
 	})
-	_, _ = qr.Add("worker")
-
-	g := tempo.NewRunGroup(
-		tempo.RunGroupShutdownTimeout(5 * time.Second),
-	)
-	g.Add("http1", tempo.RunGroupHTTPServer(fmt.Sprintf(":%d", port1), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, "server %d\n", port1)
-	})))
-	g.Add("http2", tempo.RunGroupHTTPServer(fmt.Sprintf(":%d", port2), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, "server %d\n", port2)
-	})))
-	g.Add("taskrunner", qr.AsRunGroupRunner())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-
-	err = g.RunWithContext(ctx)
-	if err != nil {
-		fmt.Printf("shutdown error: %v\n", err)
-		return
-	}
-
-	if testHttpRequest(port1) == nil {
-		fmt.Println("http1 still up (unexpected)")
-	}
-	if testHttpRequest(port2) == nil {
-		fmt.Println("http2 still up (unexpected)")
-	}
-	fmt.Println("all services stopped")
-	// output: all services stopped
+	go func() {
+		_ = rg.Stop(ctx)
+	}()
+	_ = rg.Run()
+	fmt.Println("group runner stopped")
+	// output: group runner stopped
 }
 
 // httpServer is a small helper function that stars a dummy http server on the given port
@@ -336,7 +294,8 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	runner.RegisterTask("work", tempo.TaskDef{
+	runner.RegisterTask(tempo.TaskDef{
+		Name: "work",
 		Run: func(ctx context.Context) error {
 			time.Sleep(2 * time.Millisecond)
 			return nil
@@ -383,7 +342,8 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	runner2.RegisterTask("work", tempo.TaskDef{
+	runner2.RegisterTask(tempo.TaskDef{
+		Name: "work",
 		Run: func(ctx context.Context) error {
 			time.Sleep(2 * time.Millisecond)
 			return nil

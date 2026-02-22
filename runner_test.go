@@ -35,7 +35,7 @@ func TestTaskData(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 3, QueueSize: 20})
-		r.RegisterTask("some action", tempo.TaskDef{
+		r.RegisterTask(tempo.TaskDef{Name: "some action",
 			Run: func(ctx context.Context) error {
 				time.Sleep(10 * time.Minute)
 				return nil
@@ -85,7 +85,9 @@ func TestRunnerParallelism(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 10})
 			for i := 1; i <= 4; i++ {
 				n := i
-				r.RegisterTask(strconv.Itoa(n), tempo.TaskDef{
+				name := strconv.Itoa(n)
+				r.RegisterTask(tempo.TaskDef{
+					Name: name,
 					Run: func(ctx context.Context) error {
 						lock.Lock()
 						result = append(result, strconv.Itoa(n))
@@ -131,7 +133,9 @@ func TestRunnerParallelism(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 3, QueueSize: 20})
 			for i := 1; i <= 12; i++ {
 				n := i
-				r.RegisterTask(strconv.Itoa(n), tempo.TaskDef{
+				name := strconv.Itoa(n)
+				r.RegisterTask(tempo.TaskDef{
+					Name: name,
 					Run: func(ctx context.Context) error {
 						lock.Lock()
 						result = append(result, strconv.Itoa(n))
@@ -180,7 +184,7 @@ func TestRunnerParallelism(t *testing.T) {
 func TestRunnerLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		r.RegisterTask("some action", tempo.TaskDef{
+		r.RegisterTask(tempo.TaskDef{Name: "some action",
 			Run: func(ctx context.Context) error {
 				time.Sleep(10 * time.Minute)
 				return nil
@@ -219,8 +223,8 @@ func TestRunnerHistoryClean(t *testing.T) {
 	t.Run("big history", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, HistorySize: 50})
-			r.RegisterTask("success", tempo.TaskDef{Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return nil }})
-			r.RegisterTask("fail", tempo.TaskDef{Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return fmt.Errorf("fail task") }})
+			r.RegisterTask(tempo.TaskDef{Name: "success", Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return nil }})
+			r.RegisterTask(tempo.TaskDef{Name: "fail", Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return fmt.Errorf("fail task") }})
 			r.StartBg()
 
 			for i := 1; i <= 10; i++ {
@@ -265,8 +269,8 @@ func TestRunnerHistoryClean(t *testing.T) {
 	t.Run("expect clean with small history", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, HistorySize: 5})
-			r.RegisterTask("success", tempo.TaskDef{Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return nil }})
-			r.RegisterTask("fail", tempo.TaskDef{Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return fmt.Errorf("fail task") }})
+			r.RegisterTask(tempo.TaskDef{Name: "success", Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return nil }})
+			r.RegisterTask(tempo.TaskDef{Name: "fail", Run: func(ctx context.Context) error { time.Sleep(1 * time.Minute); return fmt.Errorf("fail task") }})
 			r.StartBg()
 
 			for i := 1; i <= 10; i++ {
@@ -316,7 +320,8 @@ func TestRunnerShutdown(t *testing.T) {
 			var result []string
 			lock := sync.Mutex{}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 10})
-			r.RegisterTask("1", tempo.TaskDef{
+			r.RegisterTask(tempo.TaskDef{
+				Name: "1",
 				Run: func(ctx context.Context) error {
 					select {
 					case <-time.After(10 * time.Minute):
@@ -333,7 +338,8 @@ func TestRunnerShutdown(t *testing.T) {
 					}
 				},
 			})
-			r.RegisterTask("2", tempo.TaskDef{
+			r.RegisterTask(tempo.TaskDef{
+				Name: "2",
 				Run: func(ctx context.Context) error {
 					select {
 					case <-time.After(10 * time.Minute):
@@ -385,7 +391,8 @@ func TestRunnerShutdown(t *testing.T) {
 			var result []string
 			lock := sync.Mutex{}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 10})
-			r.RegisterTask("1", tempo.TaskDef{
+			r.RegisterTask(tempo.TaskDef{
+				Name: "1",
 				Run: func(ctx context.Context) error {
 					select {
 					case <-time.After(10 * time.Minute):
@@ -402,7 +409,8 @@ func TestRunnerShutdown(t *testing.T) {
 					}
 				},
 			})
-			r.RegisterTask("2", tempo.TaskDef{
+			r.RegisterTask(tempo.TaskDef{
+				Name: "2",
 				Run: func(ctx context.Context) error {
 					select {
 					case <-time.After(10 * time.Minute):
@@ -460,7 +468,7 @@ func TestRunnerRaceConditions(t *testing.T) {
 	t.Run("max parallelism reached", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20, HistorySize: 10})
-			r.RegisterTask("some action", tempo.TaskDef{
+			r.RegisterTask(tempo.TaskDef{Name: "some action",
 				Run: func(ctx context.Context) error {
 					time.Sleep(10 * time.Minute)
 					return nil
@@ -512,7 +520,7 @@ func TestRunnerRaceConditions(t *testing.T) {
 func TestRunnerCatchPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
-		r.RegisterTask("some action", tempo.TaskDef{
+		r.RegisterTask(tempo.TaskDef{Name: "some action",
 			Run: func(ctx context.Context) error {
 				time.Sleep(1 * time.Minute)
 				panic("panic")
@@ -563,8 +571,8 @@ func TestRunnerCancel(t *testing.T) {
 				}
 			}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 20})
-			r.RegisterTask("running task", tempo.TaskDef{Run: fn})
-			r.RegisterTask("waiting task", tempo.TaskDef{Run: fn})
+			r.RegisterTask(tempo.TaskDef{Name: "running task", Run: fn})
+			r.RegisterTask(tempo.TaskDef{Name: "waiting task", Run: fn})
 			r.StartBg()
 
 			_, err := r.Add("running task")
@@ -633,7 +641,7 @@ func TestRunnerCancel(t *testing.T) {
 				}
 			}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
-			r.RegisterTask("timeout_fn", tempo.TaskDef{Run: fn})
+			r.RegisterTask(tempo.TaskDef{Name: "timeout_fn", Run: fn})
 			r.StartBg()
 
 			id, err := r.Add("timeout_fn")
@@ -708,7 +716,7 @@ func TestRunnerCancel(t *testing.T) {
 				}
 			}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
-			r.RegisterTask("timeout_fn", tempo.TaskDef{Run: fn})
+			r.RegisterTask(tempo.TaskDef{Name: "timeout_fn", Run: fn})
 			r.StartBg()
 
 			id, err := r.Add("timeout_fn")
