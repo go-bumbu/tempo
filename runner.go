@@ -10,22 +10,37 @@ import (
 	"github.com/google/uuid"
 )
 
-// QueueRunner is a task runner that manages task execution with parallelism control
+// taskLookupper is satisfied by *TaskRegistry (and any type with Lookup for resolving name -> TaskDef).
+type taskLookupper interface {
+	Lookup(name string) (TaskDef, bool)
+}
+
+// QueueRunner runs tasks from a TaskQueue by pulling the next task from the queue and the function from the registry.
 type QueueRunner struct {
-	TaskQueue
-	wg           sync.WaitGroup
+	queue        *TaskQueue
+	lookup       taskLookupper
 	parallelism  int
+	historySize  int
 	cleanupTimer time.Duration
 
-	// runtime context
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// handle the clean shutdown
 	stopOnce sync.Once
 	stopChan chan struct{}
+	wg       sync.WaitGroup
+
+	runMu        sync.Mutex
+	running      map[uuid.UUID]runState
+	runningCount map[string]int
 }
 
+type runState struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// RunnerCfg holds configuration for the queue runner.
 type RunnerCfg struct {
 	Parallelism  int
 	QueueSize    int
@@ -33,95 +48,122 @@ type RunnerCfg struct {
 	CleanupTimer time.Duration
 }
 
-// NewQueueRunner creates a new QueueRunner instance
-func NewQueueRunner(cfg RunnerCfg) *QueueRunner {
+// NewQueueRunner creates a QueueRunner that gets the next task from the queue and the function from the registry.
+func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue, registry taskLookupper) *QueueRunner {
 	ctx, cancel := context.WithCancel(context.Background())
-
 	if cfg.CleanupTimer == 0 {
 		cfg.CleanupTimer = 5 * time.Minute
 	}
 	if cfg.HistorySize == 0 {
 		cfg.HistorySize = 10
 	}
-
-	rq := QueueRunner{
-		TaskQueue: TaskQueue{
-			mu:         sync.Mutex{},
-			tasks:      []*QueuedTask{},
-			maxWaiting: cfg.QueueSize,
-			maxDone:    cfg.HistorySize,
-		},
+	r := &QueueRunner{
+		queue:        queue,
+		lookup:       registry,
 		parallelism:  cfg.Parallelism,
+		historySize:  cfg.HistorySize,
 		cleanupTimer: cfg.CleanupTimer,
-
-		ctx:    ctx,
-		cancel: cancel,
-
-		stopChan: make(chan struct{}),
+		ctx:          ctx,
+		cancel:       cancel,
+		stopChan:     make(chan struct{}),
+		running:      make(map[uuid.UUID]runState),
+		runningCount: make(map[string]int),
 	}
-	rq.cond = sync.NewCond(&rq.mu)
-	return &rq
+	return r
 }
 
-// StartBg begins processing tasks
+// StartBg begins processing tasks from the store.
 func (r *QueueRunner) StartBg() {
-
 	r.wg.Go(func() {
 		<-r.ctx.Done()
-		// Wake up waiting workers to shut down
-		r.unlockAllWaiting()
+		r.queue.UnblockAll()
 	})
 
-	// run cleanup function in the background
 	go r.autoClean()
 
-	// Fixed worker pool - each worker loops forever
 	for i := 0; i < r.parallelism; i++ {
 		r.wg.Go(func() {
 			for {
-				task, err := r.WaitAndClaimTask(r.ctx)
+				canClaim := r.buildCanClaim()
+				id, name, err := r.queue.NextTask(r.ctx, canClaim)
 				if err != nil {
-					return // Shutdown
+					return
 				}
 
+				r.runMu.Lock()
+				r.runningCount[name]++
+				r.runMu.Unlock()
+
+				def, ok := r.lookup.Lookup(name)
+				if !ok {
+					_ = r.queue.SetStatus(context.Background(), id, TaskStatusFailed, time.Time{}, time.Now())
+					r.decrRunningCount(name)
+					continue
+				}
+
+				childCtx, taskCancel := context.WithCancel(r.ctx)
+				done := make(chan struct{})
+				r.runMu.Lock()
+				r.running[id] = runState{cancel: taskCancel, done: done}
+				r.runMu.Unlock()
+
+				var finalStatus TaskStatus
+				var finalEndedAt time.Time
 				func() {
-					childCtx, taskCancel := context.WithCancel(r.ctx)
 					defer func() {
 						taskCancel()
-						close(task.done)
+						close(done)
+						r.runMu.Lock()
+						delete(r.running, id)
+						r.runMu.Unlock()
+						r.decrRunningCount(name)
 						if recVal := recover(); recVal != nil {
-							r.mu.Lock()
-							task.Status = TaskStatusPanicked
-							task.err = fmt.Errorf("task panicked: %v", recVal)
-							r.mu.Unlock()
+							finalStatus = TaskStatusPanicked
+							finalEndedAt = time.Now()
 						}
 					}()
-					// set the cancel function
-					r.mu.Lock()
-					task.cancelFn = taskCancel
-					r.mu.Unlock()
-
-					// call the task
-					taskErr := task.Run(childCtx)
-					// handle the task error
-					r.mu.Lock()
-					task.EndedAt = time.Now()
+					taskErr := def.Run(childCtx)
+					finalEndedAt = time.Now()
 					if taskErr != nil {
 						if errors.Is(taskErr, context.Canceled) {
-							task.Status = TaskStatusCanceled
+							finalStatus = TaskStatusCanceled
 						} else {
-							task.Status = TaskStatusFailed
+							finalStatus = TaskStatusFailed
 						}
-						task.err = taskErr
 					} else {
-						task.Status = TaskStatusComplete
+						finalStatus = TaskStatusComplete
 					}
-					r.mu.Unlock()
 				}()
 
+				_ = r.queue.SetStatus(context.Background(), id, finalStatus, time.Time{}, finalEndedAt)
 			}
 		})
 	}
+}
+
+func (r *QueueRunner) buildCanClaim() func(name string) bool {
+	return func(name string) bool {
+		def, ok := r.lookup.Lookup(name)
+		if !ok {
+			return true
+		}
+		if def.MaxParallelism == 0 {
+			return true
+		}
+		r.runMu.Lock()
+		n := r.runningCount[name]
+		r.runMu.Unlock()
+		return n < def.MaxParallelism
+	}
+}
+
+func (r *QueueRunner) decrRunningCount(name string) {
+	r.runMu.Lock()
+	r.runningCount[name]--
+	if r.runningCount[name] <= 0 {
+		delete(r.runningCount, name)
+	}
+	r.runMu.Unlock()
 }
 
 func (r *QueueRunner) autoClean() {
@@ -129,70 +171,71 @@ func (r *QueueRunner) autoClean() {
 	for {
 		select {
 		case <-ticker.C:
-			r.CleanHistory()
+			_ = r.queue.CleanHistory(context.Background(), r.historySize)
 		case <-r.stopChan:
-			// stop signal received, exit the goroutine
 			return
 		}
 	}
 }
 
+// Add enqueues a task by name. The runner will look up the function from the registry when it runs.
+func (r *QueueRunner) Add(name string) (uuid.UUID, error) {
+	return r.queue.Add(name)
+}
+
+// List returns all tasks from the queue (e.g. for API display).
+func (r *QueueRunner) List() []TaskInfo {
+	list, err := r.queue.List(context.Background())
+	if err != nil {
+		return nil
+	}
+	return list
+}
+
+// GetTask returns task metadata by id. Returns ErrTaskNotFound if not found.
+func (r *QueueRunner) GetTask(id uuid.UUID) (TaskInfo, error) {
+	return r.queue.Get(context.Background(), id)
+}
+
+// Cancel cancels a waiting or running task.
 func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
-	task, err := r.GetTask(id)
+	r.runMu.Lock()
+	state, running := r.running[id]
+	r.runMu.Unlock()
+
+	if running {
+		state.cancel()
+		select {
+		case <-state.done:
+			_ = r.queue.SetStatus(context.Background(), id, TaskStatusCanceled, time.Time{}, time.Now())
+			return nil
+		case <-ctx.Done():
+			_ = r.queue.SetStatus(context.Background(), id, TaskStatusCancelError, time.Time{}, time.Now())
+			return fmt.Errorf("cancel timeout: %w", ctx.Err())
+		}
+	}
+
+	info, err := r.queue.Get(ctx, id)
 	if err != nil {
 		return err
 	}
-	r.mu.Lock()
-	status := task.Status
-	r.mu.Unlock()
-
-	switch status {
-	case TaskStatusWaiting:
-		r.mu.Lock()
-		task.Status = TaskStatusCanceled
-		task.EndedAt = time.Now()
-		r.mu.Unlock()
-		return nil
-	case TaskStatusRunning:
-		r.mu.Lock()
-		task.cancelFn()
-		r.mu.Unlock()
-		// Wait until task finishes OR caller's ctx times out
-		select {
-		case <-task.done:
-			// Run stopped
-			r.mu.Lock()
-			task.Status = TaskStatusCanceled
-			task.EndedAt = time.Now()
-			r.mu.Unlock()
-			return nil
-
-		// if we get into this situation, a task implementation is doing bad things
-		// we keep this in place so that a caller of the library might be able to log and alert upon
-		// NOTE in this situation the task keeps running
-		case <-ctx.Done():
-			r.mu.Lock()
-			task.Status = TaskStatusCancelError
-			task.EndedAt = time.Now()
-			r.mu.Unlock()
-			// Run didn't stop in time
-			return fmt.Errorf("cancel timeout: %w", ctx.Err())
-		}
-	default:
-		// todo error?
-		return fmt.Errorf("unknown task status: %v", task.Status.Str())
+	if info.Status == TaskStatusWaiting {
+		return r.queue.SetStatus(ctx, id, TaskStatusCanceled, time.Time{}, time.Now())
 	}
-
+	if info.Status == TaskStatusRunning {
+		return fmt.Errorf("task %s not found in runner", id)
+	}
+	return fmt.Errorf("task not cancelable: status %s", info.Status.Str())
 }
 
 var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")
 
-// ShutDown gracefully shuts down the runner
+// ShutDown gracefully shuts down the runner.
 func (r *QueueRunner) ShutDown(ctx context.Context) error {
 	var err error
-
 	r.stopOnce.Do(func() {
-		r.cancel() // notify running jobs to stop
+		r.queue.UnblockAll()
+		r.cancel()
 
 		shutdownCh := make(chan struct{})
 		go func() {
@@ -206,14 +249,12 @@ func (r *QueueRunner) ShutDown(ctx context.Context) error {
 		case <-ctx.Done():
 			err = ErrUnsafeStop
 		}
-
-		// Unblock Wait() if it's waiting
 		close(r.stopChan)
 	})
 	return err
 }
 
-// Wait blocks until the runner has shut down
+// Wait blocks until the runner has shut down.
 func (r *QueueRunner) Wait() {
 	<-r.stopChan
 }

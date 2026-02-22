@@ -19,30 +19,32 @@ func ExampleQueueRunner() {
 		}
 	}()
 
+	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 10, HistorySize: 10})
+	reg := tempo.NewTaskRegistry()
+	for i := range 5 {
+		name := fmt.Sprintf("task_%d", i)
+		n := name
+		reg.Add(name, tempo.TaskDef{
+			Run: func(ctx context.Context) error {
+				fmt.Printf("Executing task: %s\n", n)
+				return nil
+			},
+		})
+	}
 	qrun := tempo.NewQueueRunner(tempo.RunnerCfg{
 		Parallelism: 2,
 		QueueSize:   10,
 		HistorySize: 10,
-	})
+	}, queue, reg)
 
-	// start in the background
 	qrun.StartBg()
 
-	// the task function
-	fn := func(name string) func(context.Context) error {
-		return func(ctx context.Context) error {
-			fmt.Printf("Executing task: %s\n", name)
-			return nil
-		}
-	}
-	// add the task to be processed
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
-		_, err := qrun.Add(fn(name), name)
+		_, err := qrun.Add(name)
 		if err != nil {
 			panic(err)
 		}
-		// add small delay to ensure execution order
 		time.Sleep(5 * time.Millisecond)
 	}
 
@@ -73,43 +75,38 @@ func ExampleQueueRunner_runHttpServer() {
 		}
 	}()
 
-	q := tempo.NewQueueRunner(tempo.RunnerCfg{
-		Parallelism: 2,
-		QueueSize:   2,
-	})
-
-	// start in the background
-	q.StartBg()
-
 	port1, err := GetFreePort()
 	if err != nil {
 		panic(err)
 	}
-
-	// add the first server
-	_, err = q.Add(func(ctx context.Context) error {
-		err := httpServer(ctx, port1)
-		if err != nil {
-			panic(err)
-		}
-		return nil
-	}, "server1")
-	if err != nil {
-		panic(err)
-	}
-
-	// add the second server
 	port2, err := GetFreePort()
 	if err != nil {
 		panic(err)
 	}
-	_, err = q.Add(func(ctx context.Context) error {
-		err := httpServer(ctx, port2)
-		if err != nil {
-			panic(err)
-		}
-		return nil
-	}, "server2")
+	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 2})
+	reg := tempo.NewTaskRegistry()
+	reg.Add("server1", tempo.TaskDef{
+		Run: func(ctx context.Context) error {
+			return httpServer(ctx, port1)
+		},
+	})
+	reg.Add("server2", tempo.TaskDef{
+		Run: func(ctx context.Context) error {
+			return httpServer(ctx, port2)
+		},
+	})
+	q := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 2,
+		QueueSize:   2,
+	}, queue, reg)
+
+	q.StartBg()
+
+	_, err = q.Add("server1")
+	if err != nil {
+		panic(err)
+	}
+	_, err = q.Add("server2")
 	if err != nil {
 		panic(err)
 	}
