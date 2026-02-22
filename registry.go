@@ -14,28 +14,17 @@ type TaskDef struct {
 	MaxParallelism int
 }
 
-// TaskRegistry is the interface for registering and looking up task definitions.
-// The runner uses it to resolve task name -> TaskDef when executing.
-type TaskRegistry interface {
-	Add(name string, def TaskDef)
-	Remove(name string)
-	Lookup(name string) (TaskDef, bool)
-}
-
-// taskRegistry is the default in-memory implementation of TaskRegistry.
+// taskRegistry is the internal in-memory registry; only the runner uses lookup.
 type taskRegistry struct {
 	mu    sync.RWMutex
 	tasks map[string]TaskDef
 }
 
-// NewTaskRegistry creates an empty registry.
-func NewTaskRegistry() TaskRegistry {
-	return &taskRegistry{
-		tasks: make(map[string]TaskDef),
-	}
+func newTaskRegistry() *taskRegistry {
+	return &taskRegistry{tasks: make(map[string]TaskDef)}
 }
 
-func (r *taskRegistry) Add(name string, def TaskDef) {
+func (r *taskRegistry) add(name string, def TaskDef) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tasks == nil {
@@ -44,13 +33,13 @@ func (r *taskRegistry) Add(name string, def TaskDef) {
 	r.tasks[name] = def
 }
 
-func (r *taskRegistry) Remove(name string) {
+func (r *taskRegistry) remove(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.tasks, name)
 }
 
-func (r *taskRegistry) Lookup(name string) (TaskDef, bool) {
+func (r *taskRegistry) lookup(name string) (TaskDef, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	def, ok := r.tasks[name]

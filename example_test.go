@@ -25,22 +25,21 @@ func ExampleQueueRunner() {
 	}()
 
 	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 10, HistorySize: 10})
-	reg := tempo.NewTaskRegistry()
+	qrun := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 2,
+		QueueSize:   10,
+		HistorySize: 10,
+	}, queue)
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
 		n := name
-		reg.Add(name, tempo.TaskDef{
+		qrun.RegisterTask(name, tempo.TaskDef{
 			Run: func(ctx context.Context) error {
 				fmt.Printf("Executing task: %s\n", n)
 				return nil
 			},
 		})
 	}
-	qrun := tempo.NewQueueRunner(tempo.RunnerCfg{
-		Parallelism: 2,
-		QueueSize:   10,
-		HistorySize: 10,
-	}, queue, reg)
 
 	qrun.StartBg()
 
@@ -89,21 +88,20 @@ func ExampleQueueRunner_runHttpServer() {
 		panic(err)
 	}
 	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 2})
-	reg := tempo.NewTaskRegistry()
-	reg.Add("server1", tempo.TaskDef{
+	q := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 2,
+		QueueSize:   2,
+	}, queue)
+	q.RegisterTask("server1", tempo.TaskDef{
 		Run: func(ctx context.Context) error {
 			return httpServer(ctx, port1)
 		},
 	})
-	reg.Add("server2", tempo.TaskDef{
+	q.RegisterTask("server2", tempo.TaskDef{
 		Run: func(ctx context.Context) error {
 			return httpServer(ctx, port2)
 		},
 	})
-	q := tempo.NewQueueRunner(tempo.RunnerCfg{
-		Parallelism: 2,
-		QueueSize:   2,
-	}, queue, reg)
 
 	q.StartBg()
 
@@ -153,6 +151,64 @@ func ExampleQueueRunner_runHttpServer() {
 	// output (List returns tasks by queue time, newest first):
 	//task "server2" in status running
 	//task "server1" in status running
+}
+
+// ExampleRunGroup demonstrates running multiple services (two HTTP servers and a task runner)
+// in parallel and shutting them all down cleanly when a signal is received or context is done.
+func ExampleRunGroup() {
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Printf("example failed: %v", err)
+		}
+	}()
+
+	port1, _ := GetFreePort()
+	port2, _ := GetFreePort()
+
+	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 2, HistorySize: 5})
+	qr := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 1,
+		QueueSize:   2,
+		HistorySize: 5,
+	}, queue)
+	qr.RegisterTask("worker", tempo.TaskDef{
+		Run: func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	_, _ = qr.Add("worker")
+
+	g := tempo.NewRunGroup(
+		tempo.RunGroupShutdownTimeout(5 * time.Second),
+	)
+	g.Add("http1", tempo.RunGroupHTTPServer(fmt.Sprintf(":%d", port1), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "server %d\n", port1)
+	})))
+	g.Add("http2", tempo.RunGroupHTTPServer(fmt.Sprintf(":%d", port2), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "server %d\n", port2)
+	})))
+	g.Add("taskrunner", qr.AsRunGroupRunner())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := g.RunWithContext(ctx)
+	if err != nil {
+		fmt.Printf("shutdown error: %v\n", err)
+		return
+	}
+
+	if testHttpRequest(port1) == nil {
+		fmt.Println("http1 still up (unexpected)")
+	}
+	if testHttpRequest(port2) == nil {
+		fmt.Println("http2 still up (unexpected)")
+	}
+	fmt.Println("all services stopped")
+	// output: all services stopped
 }
 
 // httpServer is a small helper function that stars a dummy http server on the given port
@@ -264,19 +320,17 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 
 	cfg := tempo.TaskQueueCfg{QueueSize: 50, HistorySize: 20}
 	queue := tempo.NewTaskQueueWithPersistence(cfg, persist)
-	reg := tempo.NewTaskRegistry()
-	reg.Add("work", tempo.TaskDef{
+	runner := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 3,
+		QueueSize:   50,
+		HistorySize: 20,
+	}, queue)
+	runner.RegisterTask("work", tempo.TaskDef{
 		Run: func(ctx context.Context) error {
 			time.Sleep(2 * time.Millisecond)
 			return nil
 		},
 	})
-
-	runner := tempo.NewQueueRunner(tempo.RunnerCfg{
-		Parallelism: 3,
-		QueueSize:   50,
-		HistorySize: 20,
-	}, queue, reg)
 	runner.StartBg()
 
 	// Concurrent adds from multiple goroutines
@@ -314,7 +368,13 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		Parallelism: 3,
 		QueueSize:   50,
 		HistorySize: 20,
-	}, queue2, reg)
+	}, queue2)
+	runner2.RegisterTask("work", tempo.TaskDef{
+		Run: func(ctx context.Context) error {
+			time.Sleep(2 * time.Millisecond)
+			return nil
+		},
+	})
 	runner2.StartBg()
 
 	list2 := runner2.List()

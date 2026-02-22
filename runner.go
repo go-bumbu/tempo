@@ -10,15 +10,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// taskLookupper is satisfied by TaskRegistry and any type with Lookup for resolving name -> TaskDef.
-type taskLookupper interface {
-	Lookup(name string) (TaskDef, bool)
-}
-
-// QueueRunner runs tasks from a TaskQueue by pulling the next task from the queue and the function from the registry.
+// QueueRunner runs tasks from a TaskQueue by pulling the next task from the queue and the function from its registry.
 type QueueRunner struct {
 	queue        *TaskQueue
-	lookup       taskLookupper
+	registry     *taskRegistry
 	parallelism  int
 	historySize  int
 	cleanupTimer time.Duration
@@ -48,8 +43,8 @@ type RunnerCfg struct {
 	CleanupTimer time.Duration
 }
 
-// NewQueueRunner creates a QueueRunner that gets the next task from the queue and the function from the registry.
-func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue, registry taskLookupper) *QueueRunner {
+// NewQueueRunner creates a QueueRunner with an internal task registry. Use RegisterTask to add task definitions.
+func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue) *QueueRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 	if cfg.CleanupTimer == 0 {
 		cfg.CleanupTimer = 5 * time.Minute
@@ -57,9 +52,10 @@ func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue, registry taskLookupper) *Qu
 	if cfg.HistorySize == 0 {
 		cfg.HistorySize = 10
 	}
+	reg := newTaskRegistry()
 	r := &QueueRunner{
 		queue:        queue,
-		lookup:       registry,
+		registry:     reg,
 		parallelism:  cfg.Parallelism,
 		historySize:  cfg.HistorySize,
 		cleanupTimer: cfg.CleanupTimer,
@@ -70,6 +66,11 @@ func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue, registry taskLookupper) *Qu
 		runningCount: make(map[string]int),
 	}
 	return r
+}
+
+// RegisterTask registers a task definition for the given name (overwrites if present).
+func (r *QueueRunner) RegisterTask(name string, def TaskDef) {
+	r.registry.add(name, def)
 }
 
 // StartBg begins processing tasks from the store.
@@ -94,7 +95,7 @@ func (r *QueueRunner) StartBg() {
 				r.runningCount[name]++
 				r.runMu.Unlock()
 
-				def, ok := r.lookup.Lookup(name)
+				def, ok := r.registry.lookup(name)
 				if !ok {
 					_ = r.queue.SetStatus(context.Background(), id, TaskStatusFailed, time.Time{}, time.Now())
 					r.decrRunningCount(name)
@@ -143,7 +144,7 @@ func (r *QueueRunner) StartBg() {
 
 func (r *QueueRunner) buildCanClaim() func(name string) bool {
 	return func(name string) bool {
-		def, ok := r.lookup.Lookup(name)
+		def, ok := r.registry.lookup(name)
 		if !ok {
 			return true
 		}
