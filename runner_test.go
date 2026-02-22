@@ -17,7 +17,7 @@ import (
 )
 
 // newTestRunner creates a QueueRunner with the given TaskQueue and TaskRegistry.
-func newTestRunner(cfg tempo.RunnerCfg, queue *tempo.TaskQueue, registry *tempo.TaskRegistry) *tempo.QueueRunner {
+func newTestRunner(cfg tempo.RunnerCfg, queue *tempo.TaskQueue, registry tempo.TaskRegistry) *tempo.QueueRunner {
 	if cfg.HistorySize == 0 {
 		cfg.HistorySize = 10
 	}

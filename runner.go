@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// taskLookupper is satisfied by *TaskRegistry (and any type with Lookup for resolving name -> TaskDef).
+// taskLookupper is satisfied by TaskRegistry and any type with Lookup for resolving name -> TaskDef.
 type taskLookupper interface {
 	Lookup(name string) (TaskDef, bool)
 }

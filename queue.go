@@ -73,6 +73,40 @@ type TaskStatePersistence interface {
 	RemoveTasks(ctx context.Context, ids []uuid.UUID) error
 }
 
+// RecoverablePersistence can load persisted tasks for recovery (e.g. after restart).
+type RecoverablePersistence interface {
+	TaskStatePersistence
+	List(ctx context.Context) ([]TaskInfo, error)
+}
+
+// MemPersistence is an in-memory implementation of TaskStatePersistence.
+// It is used by default when no external persistence is provided.
+type MemPersistence struct {
+	mu    sync.Mutex
+	tasks map[uuid.UUID]TaskInfo
+}
+
+// NewMemPersistence returns a new in-memory persistence.
+func NewMemPersistence() *MemPersistence {
+	return &MemPersistence{tasks: make(map[uuid.UUID]TaskInfo)}
+}
+
+func (m *MemPersistence) SaveTask(ctx context.Context, task TaskInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasks[task.ID] = task
+	return nil
+}
+
+func (m *MemPersistence) RemoveTasks(ctx context.Context, ids []uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range ids {
+		delete(m.tasks, id)
+	}
+	return nil
+}
+
 // taskRecord holds metadata for one task in the queue.
 type taskRecord struct {
 	id        uuid.UUID
@@ -101,15 +135,19 @@ type TaskQueueCfg struct {
 	HistorySize int
 }
 
-// NewTaskQueue creates a TaskQueue with no persistence (memory-only).
+// NewTaskQueue creates a TaskQueue with in-memory persistence (no external store).
 func NewTaskQueue(cfg TaskQueueCfg) *TaskQueue {
-	return NewTaskQueueWithPersistence(cfg, nil)
+	return NewTaskQueueWithPersistence(cfg, NewMemPersistence())
 }
 
-// NewTaskQueueWithPersistence creates a TaskQueue that mirrors state to p when non-nil.
+// NewTaskQueueWithPersistence creates a TaskQueue that mirrors state to p.
+// If p is nil, an in-memory persistence is used.
 func NewTaskQueueWithPersistence(cfg TaskQueueCfg, p TaskStatePersistence) *TaskQueue {
 	if cfg.HistorySize <= 0 {
 		cfg.HistorySize = 10
+	}
+	if p == nil {
+		p = NewMemPersistence()
 	}
 	q := &TaskQueue{
 		tasks:      make([]*taskRecord, 0),
@@ -118,6 +156,20 @@ func NewTaskQueueWithPersistence(cfg TaskQueueCfg, p TaskStatePersistence) *Task
 		persist:    p,
 	}
 	q.cond = sync.NewCond(&q.mu)
+	if r, ok := p.(RecoverablePersistence); ok {
+		if list, err := r.List(context.Background()); err == nil && len(list) > 0 {
+			for _, info := range list {
+				q.tasks = append(q.tasks, &taskRecord{
+					id:        info.ID,
+					name:      info.Name,
+					status:    info.Status,
+					queuedAt:  info.QueuedAt,
+					startedAt: info.StartedAt,
+					endedAt:   info.EndedAt,
+				})
+			}
+		}
+	}
 	return q
 }
 
@@ -137,9 +189,7 @@ func (q *TaskQueue) Add(name string) (uuid.UUID, error) {
 		queuedAt: now,
 	}
 	q.tasks = append(q.tasks, t)
-	if q.persist != nil {
-		_ = q.persist.SaveTask(context.Background(), q.recordToInfo(t))
-	}
+	_ = q.persist.SaveTask(context.Background(), q.recordToInfo(t))
 	q.cond.Signal()
 	return id, nil
 }
@@ -158,9 +208,7 @@ func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) boo
 			}
 			t.status = TaskStatusRunning
 			t.startedAt = time.Now()
-			if q.persist != nil {
-				_ = q.persist.SaveTask(context.Background(), q.recordToInfo(t))
-			}
+			_ = q.persist.SaveTask(context.Background(), q.recordToInfo(t))
 			id, name := t.id, t.name
 			q.mu.Unlock()
 			return id, name, nil
@@ -214,9 +262,7 @@ func (q *TaskQueue) SetStatus(ctx context.Context, id uuid.UUID, status TaskStat
 			if !endedAt.IsZero() {
 				t.endedAt = endedAt
 			}
-			if q.persist != nil {
-				_ = q.persist.SaveTask(ctx, q.recordToInfo(t))
-			}
+			_ = q.persist.SaveTask(ctx, q.recordToInfo(t))
 			return nil
 		}
 	}
@@ -251,9 +297,7 @@ func (q *TaskQueue) CleanHistory(ctx context.Context, maxDone int) error {
 		filtered = append(filtered, t)
 	}
 	q.tasks = filtered
-	if q.persist != nil && len(toRemove) > 0 {
-		_ = q.persist.RemoveTasks(ctx, toRemove)
-	}
+	_ = q.persist.RemoveTasks(ctx, toRemove)
 	return nil
 }
 

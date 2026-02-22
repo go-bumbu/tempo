@@ -180,113 +180,109 @@ func countStatus(list []TaskInfo, status TaskStatus) int {
 	return n
 }
 
-func TestQueueCleanHistory(t *testing.T) {
+func TestQueueCleanHistoryNoTerminalTasks(t *testing.T) {
 	ctx := context.Background()
+	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 1})
+	_, _ = tq.Add("a")
+	_, _ = tq.Add("b")
+	_ = tq.CleanHistory(ctx, 1)
+	list, _ := tq.List(ctx)
+	if len(list) != 2 {
+		t.Errorf("expected 2 tasks, got %d", len(list))
+	}
+}
 
-	t.Run("no terminal tasks", func(t *testing.T) {
-		tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 1})
-		_, _ = tq.Add("a")
-		_, _ = tq.Add("b")
-		_ = tq.CleanHistory(ctx, 1)
-		list, _ := tq.List(ctx)
-		if len(list) != 2 {
-			t.Errorf("expected 2 tasks, got %d", len(list))
+func TestQueueCleanHistoryLessThanMaxDone(t *testing.T) {
+	ctx := context.Background()
+	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 3})
+	_, _ = tq.Add("a")
+	_, _ = tq.Add("b")
+	_, _ = tq.Add("c")
+	list, _ := tq.List(ctx)
+	for _, task := range list {
+		if task.Name == "a" {
+			_ = tq.SetStatus(ctx, task.ID, TaskStatusComplete, time.Time{}, time.Now())
 		}
-	})
+		if task.Name == "c" {
+			_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
+		}
+	}
+	_ = tq.CleanHistory(ctx, 3)
+	list, _ = tq.List(ctx)
+	if len(list) != 3 {
+		t.Errorf("expected 3 tasks, got %d", len(list))
+	}
+}
 
-	t.Run("less than maxDone terminal tasks", func(t *testing.T) {
-		tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 3})
-		_, _ = tq.Add("a")
-		_, _ = tq.Add("b")
-		_, _ = tq.Add("c")
-		list, _ := tq.List(ctx)
-		for _, task := range list {
-			if task.Name == "a" {
-				_ = tq.SetStatus(ctx, task.ID, TaskStatusComplete, time.Time{}, time.Now())
-			}
-			if task.Name == "c" {
-				_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
-			}
+func TestQueueCleanHistoryMoreThanMaxDone(t *testing.T) {
+	ctx := context.Background()
+	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 2})
+	for i := 0; i < 5; i++ {
+		_, _ = tq.Add(fmt.Sprintf("task-%d", i))
+	}
+	list, _ := tq.List(ctx)
+	for _, task := range list {
+		switch task.Name {
+		case "task-0", "task-1", "task-4":
+			_ = tq.SetStatus(ctx, task.ID, TaskStatusComplete, time.Time{}, time.Now())
+		case "task-2":
+			_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
 		}
-		_ = tq.CleanHistory(ctx, 3)
-		list, _ = tq.List(ctx)
-		if len(list) != 3 {
-			t.Errorf("expected 3 tasks, got %d", len(list))
-		}
-	})
+	}
+	_ = tq.CleanHistory(ctx, 2)
 
-	t.Run("more than maxDone terminal tasks", func(t *testing.T) {
-		tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 2})
-		ids := make([]uuid.UUID, 5)
-		for i := 0; i < 5; i++ {
-			ids[i], _ = tq.Add(fmt.Sprintf("task-%d", i))
-		}
-		// mark 1,2,3,5 as terminal (0=Complete, 1=Complete, 2=Panicked, 3=Waiting, 4=Complete)
-		list, _ := tq.List(ctx)
-		for _, task := range list {
-			switch task.Name {
-			case "task-0", "task-1", "task-4":
-				_ = tq.SetStatus(ctx, task.ID, TaskStatusComplete, time.Time{}, time.Now())
-			case "task-2":
-				_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
-			}
-		}
-		_ = tq.CleanHistory(ctx, 2)
+	list, _ = tq.List(ctx)
+	doneCount := countStatus(list, TaskStatusComplete) + countStatus(list, TaskStatusPanicked)
+	if doneCount != 2 {
+		t.Errorf("expected 2 terminal tasks, got %d", doneCount)
+	}
+	gotOrder := make([]TaskStatus, 0, len(list))
+	for _, task := range list {
+		gotOrder = append(gotOrder, task.Status)
+	}
+	want := []TaskStatus{TaskStatusComplete, TaskStatusWaiting, TaskStatusPanicked}
+	if diff := cmp.Diff(gotOrder, want); diff != "" {
+		t.Errorf("unexpected order (-got +want)\n%s", diff)
+	}
+}
 
-		list, _ = tq.List(ctx)
-		doneCount := countStatus(list, TaskStatusComplete) + countStatus(list, TaskStatusPanicked)
-		if doneCount != 2 {
-			t.Errorf("expected 2 terminal tasks, got %d", doneCount)
+func TestQueueCleanHistoryMixPreservesOrder(t *testing.T) {
+	ctx := context.Background()
+	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 2})
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		_, _ = tq.Add(name)
+	}
+	list, _ := tq.List(ctx)
+	for _, task := range list {
+		switch task.Name {
+		case "a":
+			_ = tq.SetStatus(ctx, task.ID, TaskStatusComplete, time.Time{}, time.Now())
+		case "c":
+			_ = tq.SetStatus(ctx, task.ID, TaskStatusFailed, time.Time{}, time.Now())
+		case "e":
+			_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
 		}
-		gotOrder := make([]TaskStatus, 0, len(list))
-		for _, task := range list {
-			gotOrder = append(gotOrder, task.Status)
-		}
-		// List newest first: task-4, task-3, task-2 remain
-		want := []TaskStatus{TaskStatusComplete, TaskStatusWaiting, TaskStatusPanicked}
-		if diff := cmp.Diff(gotOrder, want); diff != "" {
-			t.Errorf("unexpected order (-got +want)\n%s", diff)
-		}
-	})
+	}
+	_ = tq.CleanHistory(ctx, 2)
 
-	t.Run("mix of terminal and non-terminal tasks preserves order", func(t *testing.T) {
-		tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 2})
-		for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
-			_, _ = tq.Add(name)
+	list, _ = tq.List(ctx)
+	doneCount := 0
+	for _, task := range list {
+		if slices.Contains(TaskTerminalStatus, task.Status) {
+			doneCount++
 		}
-		list, _ := tq.List(ctx)
-		for _, task := range list {
-			switch task.Name {
-			case "a":
-				_ = tq.SetStatus(ctx, task.ID, TaskStatusComplete, time.Time{}, time.Now())
-			case "c":
-				_ = tq.SetStatus(ctx, task.ID, TaskStatusFailed, time.Time{}, time.Now())
-			case "e":
-				_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
-			}
-		}
-		_ = tq.CleanHistory(ctx, 2)
-
-		list, _ = tq.List(ctx)
-		doneCount := 0
-		for _, task := range list {
-			if slices.Contains(TaskTerminalStatus, task.Status) {
-				doneCount++
-			}
-		}
-		if doneCount != 2 {
-			t.Errorf("expected 2 terminal tasks, got %d", doneCount)
-		}
-		gotOrder := make([]TaskStatus, 0, len(list))
-		for _, task := range list {
-			gotOrder = append(gotOrder, task.Status)
-		}
-		// List is newest-first by QueuedAt; after cleanup: f,d,e,c,b (a removed)
-		want := []TaskStatus{TaskStatusWaiting, TaskStatusPanicked, TaskStatusWaiting, TaskStatusFailed, TaskStatusWaiting}
-		if diff := cmp.Diff(gotOrder, want); diff != "" {
-			t.Errorf("unexpected order (-got +want)\n%s", diff)
-		}
-	})
+	}
+	if doneCount != 2 {
+		t.Errorf("expected 2 terminal tasks, got %d", doneCount)
+	}
+	gotOrder := make([]TaskStatus, 0, len(list))
+	for _, task := range list {
+		gotOrder = append(gotOrder, task.Status)
+	}
+	want := []TaskStatus{TaskStatusWaiting, TaskStatusPanicked, TaskStatusWaiting, TaskStatusFailed, TaskStatusWaiting}
+	if diff := cmp.Diff(gotOrder, want); diff != "" {
+		t.Errorf("unexpected order (-got +want)\n%s", diff)
+	}
 }
 
 func TestQueueUnblock(t *testing.T) {
