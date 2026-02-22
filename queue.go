@@ -129,23 +129,20 @@ type TaskQueue struct {
 	persist    TaskStatePersistence
 }
 
-// TaskQueueCfg configures queue capacity and history size.
+// TaskQueueCfg configures queue capacity, history size, and persistence.
 type TaskQueueCfg struct {
 	QueueSize   int
 	HistorySize int
+	// Persistence mirrors task state; if nil, in-memory persistence is used.
+	Persistence TaskStatePersistence
 }
 
-// NewTaskQueue creates a TaskQueue with in-memory persistence (no external store).
+// NewTaskQueue creates a TaskQueue from cfg. State is mirrored to cfg.Persistence; if nil, in-memory persistence is used.
 func NewTaskQueue(cfg TaskQueueCfg) *TaskQueue {
-	return NewTaskQueueWithPersistence(cfg, NewMemPersistence())
-}
-
-// NewTaskQueueWithPersistence creates a TaskQueue that mirrors state to p.
-// If p is nil, an in-memory persistence is used.
-func NewTaskQueueWithPersistence(cfg TaskQueueCfg, p TaskStatePersistence) *TaskQueue {
 	if cfg.HistorySize <= 0 {
 		cfg.HistorySize = 10
 	}
+	p := cfg.Persistence
 	if p == nil {
 		p = NewMemPersistence()
 	}

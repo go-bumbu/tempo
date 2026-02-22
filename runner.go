@@ -41,10 +41,15 @@ type RunnerCfg struct {
 	QueueSize    int
 	HistorySize  int
 	CleanupTimer time.Duration
+	// Persistence mirrors task state; must not be nil.
+	Persistence TaskStatePersistence
 }
 
-// NewQueueRunner creates a QueueRunner with an internal task registry. Use RegisterTask to add task definitions.
-func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue) *QueueRunner {
+// NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterTask to add task definitions. cfg.Persistence must not be nil.
+func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
+	if cfg.Persistence == nil {
+		return nil, errors.New("tempo: persistence must not be nil")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if cfg.CleanupTimer == 0 {
 		cfg.CleanupTimer = 5 * time.Minute
@@ -52,6 +57,12 @@ func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue) *QueueRunner {
 	if cfg.HistorySize == 0 {
 		cfg.HistorySize = 10
 	}
+	queueCfg := TaskQueueCfg{
+		QueueSize:   cfg.QueueSize,
+		HistorySize: cfg.HistorySize,
+		Persistence: cfg.Persistence,
+	}
+	queue := NewTaskQueue(queueCfg)
 	reg := newTaskRegistry()
 	r := &QueueRunner{
 		queue:        queue,
@@ -65,7 +76,7 @@ func NewQueueRunner(cfg RunnerCfg, queue *TaskQueue) *QueueRunner {
 		running:      make(map[uuid.UUID]runState),
 		runningCount: make(map[string]int),
 	}
-	return r
+	return r, nil
 }
 
 // RegisterTask registers a task definition for the given name (overwrites if present).

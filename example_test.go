@@ -24,12 +24,15 @@ func ExampleQueueRunner() {
 		}
 	}()
 
-	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 10, HistorySize: 10})
-	qrun := tempo.NewQueueRunner(tempo.RunnerCfg{
+	qrun, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 		Parallelism: 2,
 		QueueSize:   10,
 		HistorySize: 10,
-	}, queue)
+		Persistence: tempo.NewMemPersistence(),
+	})
+	if err != nil {
+		panic(err)
+	}
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
 		n := name
@@ -56,7 +59,7 @@ func ExampleQueueRunner() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := qrun.ShutDown(shutdownCtx)
+	err = qrun.ShutDown(shutdownCtx)
 	if err != nil {
 		panic(err)
 	}
@@ -87,11 +90,14 @@ func ExampleQueueRunner_runHttpServer() {
 	if err != nil {
 		panic(err)
 	}
-	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 2})
-	q := tempo.NewQueueRunner(tempo.RunnerCfg{
+	q, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 		Parallelism: 2,
 		QueueSize:   2,
-	}, queue)
+		Persistence: tempo.NewMemPersistence(),
+	})
+	if err != nil {
+		panic(err)
+	}
 	q.RegisterTask("server1", tempo.TaskDef{
 		Run: func(ctx context.Context) error {
 			return httpServer(ctx, port1)
@@ -165,12 +171,15 @@ func ExampleRunGroup() {
 	port1, _ := GetFreePort()
 	port2, _ := GetFreePort()
 
-	queue := tempo.NewTaskQueue(tempo.TaskQueueCfg{QueueSize: 2, HistorySize: 5})
-	qr := tempo.NewQueueRunner(tempo.RunnerCfg{
+	qr, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 		Parallelism: 1,
 		QueueSize:   2,
 		HistorySize: 5,
-	}, queue)
+		Persistence: tempo.NewMemPersistence(),
+	})
+	if err != nil {
+		panic(err)
+	}
 	qr.RegisterTask("worker", tempo.TaskDef{
 		Run: func(ctx context.Context) error {
 			<-ctx.Done()
@@ -195,7 +204,7 @@ func ExampleRunGroup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	err := g.RunWithContext(ctx)
+	err = g.RunWithContext(ctx)
 	if err != nil {
 		fmt.Printf("shutdown error: %v\n", err)
 		return
@@ -318,13 +327,15 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		panic(err)
 	}
 
-	cfg := tempo.TaskQueueCfg{QueueSize: 50, HistorySize: 20}
-	queue := tempo.NewTaskQueueWithPersistence(cfg, persist)
-	runner := tempo.NewQueueRunner(tempo.RunnerCfg{
+	runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 		Parallelism: 3,
 		QueueSize:   50,
 		HistorySize: 20,
-	}, queue)
+		Persistence: persist,
+	})
+	if err != nil {
+		panic(err)
+	}
 	runner.RegisterTask("work", tempo.TaskDef{
 		Run: func(ctx context.Context) error {
 			time.Sleep(2 * time.Millisecond)
@@ -363,12 +374,15 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	queue2 := tempo.NewTaskQueueWithPersistence(cfg, persist2)
-	runner2 := tempo.NewQueueRunner(tempo.RunnerCfg{
+	runner2, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 		Parallelism: 3,
 		QueueSize:   50,
 		HistorySize: 20,
-	}, queue2)
+		Persistence: persist2,
+	})
+	if err != nil {
+		panic(err)
+	}
 	runner2.RegisterTask("work", tempo.TaskDef{
 		Run: func(ctx context.Context) error {
 			time.Sleep(2 * time.Millisecond)
