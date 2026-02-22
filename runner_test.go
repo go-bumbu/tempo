@@ -631,7 +631,7 @@ func TestRunnerCancel(t *testing.T) {
 						lock.Lock()
 						msgs = append(msgs, "clean shutdown")
 						lock.Unlock()
-						return nil
+						return ctx.Err() // return Canceled so runner records TaskStatusCanceled
 					case <-ticker.C:
 						lock.Lock()
 						msgs = append(msgs, fmt.Sprintf("msg %d", i))

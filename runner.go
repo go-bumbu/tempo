@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -18,12 +19,17 @@ type QueueRunner struct {
 	historySize  int
 	cleanupTimer time.Duration
 
+	logSink    TaskLogSink
+	logLevel   slog.Level
+	taskLogger *slog.Logger // shared when LogSink set; handler reads task ID from context
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	stopOnce sync.Once
-	stopChan chan struct{}
-	wg       sync.WaitGroup
+	stopOnce  sync.Once
+	startDone chan struct{} // closed when StartBg has finished adding goroutines; ShutDown waits on it
+	stopChan  chan struct{}
+	wg        sync.WaitGroup
 
 	runMu        sync.Mutex
 	running      map[uuid.UUID]runState
@@ -43,6 +49,10 @@ type RunnerCfg struct {
 	CleanupTimer time.Duration
 	// Persistence mirrors task state; must not be nil.
 	Persistence TaskStatePersistence
+	// LogSink, when set, receives task log lines. Tasks use tempo.Logger(ctx).InfoContext(ctx, "msg").
+	LogSink TaskLogSink
+	// LogLevel is the minimum slog level sent to LogSink (e.g. slog.LevelInfo). Zero is Info.
+	LogLevel slog.Level
 }
 
 // NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterTask to add task definitions. cfg.Persistence must not be nil.
@@ -70,11 +80,17 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		parallelism:  cfg.Parallelism,
 		historySize:  cfg.HistorySize,
 		cleanupTimer: cfg.CleanupTimer,
+		logSink:      cfg.LogSink,
+		logLevel:     cfg.LogLevel,
 		ctx:          ctx,
 		cancel:       cancel,
+		startDone:    make(chan struct{}),
 		stopChan:     make(chan struct{}),
 		running:      make(map[uuid.UUID]runState),
 		runningCount: make(map[string]int),
+	}
+	if cfg.LogSink != nil {
+		r.taskLogger = slog.New(NewSinkHandler(cfg.LogSink, cfg.LogLevel))
 	}
 	return r, nil
 }
@@ -86,8 +102,10 @@ func (r *QueueRunner) RegisterTask(def TaskDef) {
 
 // StartBg begins processing tasks from the store.
 // The wait group count is added upfront so ShutDown can safely call Wait without racing with Add.
+// ShutDown must not be called until StartBg has returned (startDone enforces this).
 func (r *QueueRunner) StartBg() {
 	r.wg.Add(1 + r.parallelism)
+	defer close(r.startDone)
 
 	go func() {
 		defer r.wg.Done()
@@ -119,6 +137,11 @@ func (r *QueueRunner) StartBg() {
 				}
 
 				childCtx, taskCancel := context.WithCancel(r.ctx)
+				if r.logSink != nil {
+					childCtx = context.WithValue(childCtx, taskIDKey, id)
+					childCtx = context.WithValue(childCtx, taskLoggerKey, r.taskLogger)
+					r.appendTaskLog(childCtx, id, "INFO", "task started")
+				}
 				done := make(chan struct{})
 				r.runMu.Lock()
 				r.running[id] = runState{cancel: taskCancel, done: done}
@@ -137,24 +160,33 @@ func (r *QueueRunner) StartBg() {
 						if recVal := recover(); recVal != nil {
 							finalStatus = TaskStatusPanicked
 							finalEndedAt = time.Now()
+							r.appendTaskLog(childCtx, id, "ERROR", fmt.Sprint(recVal))
 						}
 					}()
 					taskErr := def.Run(childCtx)
 					finalEndedAt = time.Now()
-					if taskErr != nil {
-						if errors.Is(taskErr, context.Canceled) {
-							finalStatus = TaskStatusCanceled
-						} else {
-							finalStatus = TaskStatusFailed
-						}
-					} else {
+					if taskErr == nil {
 						finalStatus = TaskStatusComplete
+						r.appendTaskLog(childCtx, id, "INFO", "task finished")
+					} else if errors.Is(taskErr, context.Canceled) {
+						finalStatus = TaskStatusCanceled
+						r.appendTaskLog(childCtx, id, "INFO", "task canceled")
+					} else {
+						finalStatus = TaskStatusFailed
+						r.appendTaskLog(childCtx, id, "ERROR", taskErr.Error())
 					}
 				}()
 
 				_ = r.queue.SetStatus(context.Background(), id, finalStatus, time.Time{}, finalEndedAt)
 			}
 		}()
+	}
+}
+
+// appendTaskLog sends a log line to the sink when configured; errors are ignored.
+func (r *QueueRunner) appendTaskLog(ctx context.Context, id uuid.UUID, level string, msg string) {
+	if r.logSink != nil {
+		_ = r.logSink.Append(ctx, id, level, msg)
 	}
 }
 
@@ -248,9 +280,11 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")
 
 // ShutDown gracefully shuts down the runner.
+// StartBg must have been called first; ShutDown waits for StartBg to finish before proceeding.
 func (r *QueueRunner) ShutDown(ctx context.Context) error {
 	var err error
 	r.stopOnce.Do(func() {
+		<-r.startDone // ensure StartBg has completed (wg.Add done) before we Wait
 		r.queue.UnblockAll()
 		r.cancel()
 

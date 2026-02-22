@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -71,6 +72,58 @@ func ExampleQueueRunner() {
 	//Executing task: task_2
 	//Executing task: task_3
 	//Executing task: task_4
+}
+
+// ExampleMemTaskLogSink demonstrates task logging with the in-memory sink: tasks log via
+// tempo.Logger(ctx).InfoContext(ctx, "msg"), and the caller retrieves lines with sink.Logs(taskID).
+func ExampleMemTaskLogSink() {
+	logSink := tempo.NewMemTaskLogSink()
+
+	qrun, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 1,
+		QueueSize:   5,
+		HistorySize: 5,
+		Persistence: tempo.NewMemPersistence(),
+		LogSink:     logSink,
+		LogLevel:    slog.LevelInfo,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	qrun.RegisterTask(tempo.TaskDef{
+		Name: "logged_task",
+		Run: func(ctx context.Context) error {
+			// "task started" and "task finished" are logged automatically by the runner
+			tempo.Logger(ctx).InfoContext(ctx, "step 1 done")
+			tempo.Logger(ctx).WarnContext(ctx, "optional step skipped")
+			return nil
+		},
+	})
+
+	qrun.StartBg()
+
+	id, err := qrun.Add("logged_task")
+	if err != nil {
+		panic(err)
+	}
+
+	// wait for task to complete
+	time.Sleep(100 * time.Millisecond)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = qrun.ShutDown(shutdownCtx)
+
+	// retrieve and print logs for this task
+	for _, e := range logSink.Logs(id) {
+		fmt.Printf("%s: %s\n", e.Level, e.Message)
+	}
+
+	// output:
+	//INFO: task started
+	//INFO: step 1 done
+	//WARN: optional step skipped
+	//INFO: task finished
 }
 
 // ExampleQueueRunner_runHttpServer is a more complex scenario that showcases how to use the queue runner
