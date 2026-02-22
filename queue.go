@@ -3,10 +3,11 @@ package tempo
 import (
 	"context"
 	"errors"
-	"github.com/google/uuid"
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // TaskQueue Allows to manage the lifecycle of tasks in a queue: add tasks to the queue,
@@ -120,22 +121,26 @@ type TaskInfo struct {
 	EndedAt   time.Time
 }
 
+// List returns all tasks ordered by queue time (QueuedAt), newest first.
+// Callers can rely on this order for display (e.g. recently queued/canceled stay at top when grouped by status).
 func (q *TaskQueue) List() []TaskInfo {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	var info []TaskInfo
+	info := make([]TaskInfo, 0, len(q.tasks))
 	for _, task := range q.tasks {
-		qt := TaskInfo{
+		info = append(info, TaskInfo{
 			ID:        task.id,
 			Name:      task.name,
 			Status:    task.Status,
 			QueuedAt:  task.QueuedAt,
 			StartedAt: task.StartedAt,
 			EndedAt:   task.EndedAt,
-		}
-		info = append(info, qt)
+		})
 	}
+	slices.SortFunc(info, func(a, b TaskInfo) int {
+		return b.QueuedAt.Compare(a.QueuedAt)
+	})
 	return info
 }
 

@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/go-bumbu/tempo"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/go-bumbu/tempo"
 )
 
 // ExampleQueueRunner is a basic example on how to use the queue runner
@@ -147,9 +148,9 @@ func ExampleQueueRunner_runHttpServer() {
 		panic("server should be stopped after shutdown")
 	}
 
-	// output:
-	//task "server1" in status running
+	// output (List returns tasks by queue time, newest first):
 	//task "server2" in status running
+	//task "server1" in status running
 }
 
 // httpServer is a small helper function that stars a dummy http server on the given port

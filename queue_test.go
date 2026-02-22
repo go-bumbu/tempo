@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/uuid"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 )
 
 // Helper to create a test TaskQueue
@@ -374,15 +375,20 @@ func TestQueueConcurrency(t *testing.T) {
 
 		wg.Wait()
 
-		// Verify statuses updated
-		tasks := tq.List()
-		for i, task := range tasks {
-			expectedStatus := TaskStatusRunning
-			if i%2 != 0 {
-				expectedStatus = TaskStatusComplete
+		// Verify statuses updated (ids[i] had i%2==0 -> Running, else Complete)
+		expectedByID := make(map[uuid.UUID]TaskStatus)
+		for i, id := range ids {
+			if i%2 == 0 {
+				expectedByID[id] = TaskStatusRunning
+			} else {
+				expectedByID[id] = TaskStatusComplete
 			}
-			if task.Status != expectedStatus {
-				t.Errorf("task %d: expected %v, got %v", i, expectedStatus, task.Status)
+		}
+		tasks := tq.List()
+		for _, task := range tasks {
+			expected := expectedByID[task.ID]
+			if task.Status != expected {
+				t.Errorf("task %v: expected %v, got %v", task.ID, expected, task.Status)
 			}
 		}
 	})

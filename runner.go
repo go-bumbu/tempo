@@ -105,13 +105,16 @@ func (r *QueueRunner) StartBg() {
 					taskErr := task.Run(childCtx)
 					// handle the task error
 					r.mu.Lock()
-					if err != nil {
-						task.Status = TaskStatusFailed
+					task.EndedAt = time.Now()
+					if taskErr != nil {
+						if errors.Is(taskErr, context.Canceled) {
+							task.Status = TaskStatusCanceled
+						} else {
+							task.Status = TaskStatusFailed
+						}
 						task.err = taskErr
-						task.EndedAt = time.Now()
 					} else {
 						task.Status = TaskStatusComplete
-						task.EndedAt = time.Now()
 					}
 					r.mu.Unlock()
 				}()
