@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // GroupRunner runs multiple background tasks (each a TaskDef) with configuration abstracted.
@@ -32,6 +33,7 @@ type GroupRunner struct {
 	blockCh    chan struct{}
 	stopResult chan error
 	stopOnce   sync.Once
+	taskErr    error // first independent task failure; set before auto-Stop is triggered
 }
 
 // NewGroupRunner creates a GroupRunner. Add tasks with Add; then Run creates the queue (sized to the number of tasks) and blocks until Stop is called.
@@ -63,6 +65,27 @@ func (g *GroupRunner) Run() error {
 		return fmt.Errorf("tempo: no tasks added")
 	}
 
+	onFailOnce := &sync.Once{}
+	for i := range tasks {
+		original := tasks[i].Run
+		tasks[i].Run = func(ctx context.Context) error {
+			err := original(ctx)
+			if err != nil && ctx.Err() == nil {
+				onFailOnce.Do(func() {
+					g.mu.Lock()
+					g.taskErr = err
+					g.mu.Unlock()
+					go func() {
+						stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						_ = g.Stop(stopCtx)
+					}()
+				})
+			}
+			return err
+		}
+	}
+
 	cfg := RunnerCfg{
 		Parallelism: n,
 		QueueSize:   n,
@@ -87,7 +110,14 @@ func (g *GroupRunner) Run() error {
 
 	qr.StartBg()
 	<-g.blockCh
-	return <-g.stopResult
+	stopErr := <-g.stopResult
+	g.mu.Lock()
+	taskErr := g.taskErr
+	g.mu.Unlock()
+	if taskErr != nil {
+		return taskErr
+	}
+	return stopErr
 }
 
 // Stop shuts down the queue runner with the given context (e.g. context.WithTimeout), then unblocks Run. Idempotent.

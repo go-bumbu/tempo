@@ -2,6 +2,7 @@ package tempo_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -151,6 +152,41 @@ func TestGroupRunner_StopBeforeRun(t *testing.T) {
 	if err != nil {
 		t.Errorf("Run after Stop: %v", err)
 	}
+}
+
+func TestGroupRunner_TaskFailureTriggerStop(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		taskAErr := errors.New("task A failed: port in use")
+		taskBCancelled := make(chan struct{})
+
+		rg := tempo.NewGroupRunner()
+		rg.Add(tempo.TaskDef{
+			Name: "task-a",
+			Run: func(ctx context.Context) error {
+				return taskAErr // fails immediately, ctx not yet cancelled
+			},
+		})
+		rg.Add(tempo.TaskDef{
+			Name: "task-b",
+			Run: func(ctx context.Context) error {
+				<-ctx.Done()
+				close(taskBCancelled)
+				return nil
+			},
+		})
+
+		runErr := rg.Run()
+
+		if !errors.Is(runErr, taskAErr) {
+			t.Errorf("expected task error %v, got %v", taskAErr, runErr)
+		}
+		select {
+		case <-taskBCancelled:
+			// expected: task B was cancelled by the automatic stop
+		case <-time.After(5 * time.Second):
+			t.Error("task B was not cancelled after task A failed")
+		}
+	})
 }
 
 func TestGroupRunner_StopPropagatesShutdownError(t *testing.T) {
