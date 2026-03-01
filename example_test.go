@@ -2,12 +2,19 @@ package tempo_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-bumbu/tempo"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
 	"time"
+
+	"github.com/go-bumbu/tempo"
+	"github.com/google/uuid"
 )
 
 // ExampleQueueRunner is a basic example on how to use the queue runner
@@ -18,30 +25,35 @@ func ExampleQueueRunner() {
 		}
 	}()
 
-	qrun := tempo.NewQueueRunner(tempo.RunnerCfg{
+	qrun, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 		Parallelism: 2,
 		QueueSize:   10,
 		HistorySize: 10,
+		Persistence: tempo.NewMemPersistence(),
 	})
-
-	// start in the background
-	qrun.StartBg()
-
-	// the task function
-	fn := func(name string) func(context.Context) error {
-		return func(ctx context.Context) error {
-			fmt.Printf("Executing task: %s\n", name)
-			return nil
-		}
+	if err != nil {
+		panic(err)
 	}
-	// add the task to be processed
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
-		_, err := qrun.Add(fn(name), name)
+		n := name
+		qrun.RegisterTask(tempo.TaskDef{
+			Name: name,
+			Run: func(ctx context.Context) error {
+				fmt.Printf("Executing task: %s\n", n)
+				return nil
+			},
+		})
+	}
+
+	qrun.StartBg()
+
+	for i := range 5 {
+		name := fmt.Sprintf("task_%d", i)
+		_, err := qrun.Add(name)
 		if err != nil {
 			panic(err)
 		}
-		// add small delay to ensure execution order
 		time.Sleep(5 * time.Millisecond)
 	}
 
@@ -49,7 +61,7 @@ func ExampleQueueRunner() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := qrun.ShutDown(shutdownCtx)
+	err = qrun.ShutDown(shutdownCtx)
 	if err != nil {
 		panic(err)
 	}
@@ -62,6 +74,58 @@ func ExampleQueueRunner() {
 	//Executing task: task_4
 }
 
+// ExampleMemTaskLogSink demonstrates task logging with the in-memory sink: tasks log via
+// tempo.Logger(ctx).InfoContext(ctx, "msg"), and the caller retrieves lines with sink.Logs(taskID).
+func ExampleMemTaskLogSink() {
+	logSink := tempo.NewMemTaskLogSink()
+
+	qrun, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 1,
+		QueueSize:   5,
+		HistorySize: 5,
+		Persistence: tempo.NewMemPersistence(),
+		LogSink:     logSink,
+		LogLevel:    slog.LevelInfo,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	qrun.RegisterTask(tempo.TaskDef{
+		Name: "logged_task",
+		Run: func(ctx context.Context) error {
+			// "task started" and "task finished" are logged automatically by the runner
+			tempo.Logger(ctx).InfoContext(ctx, "step 1 done")
+			tempo.Logger(ctx).WarnContext(ctx, "optional step skipped")
+			return nil
+		},
+	})
+
+	qrun.StartBg()
+
+	id, err := qrun.Add("logged_task")
+	if err != nil {
+		panic(err)
+	}
+
+	// wait for task to complete
+	time.Sleep(100 * time.Millisecond)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = qrun.ShutDown(shutdownCtx)
+
+	// retrieve and print logs for this task
+	for _, e := range logSink.Logs(id) {
+		fmt.Printf("%s: %s\n", e.Level, e.Message)
+	}
+
+	// output:
+	//INFO: task started
+	//INFO: step 1 done
+	//WARN: optional step skipped
+	//INFO: task finished
+}
+
 // ExampleQueueRunner_runHttpServer is a more complex scenario that showcases how to use the queue runner
 // to start 2 http servers, and do a clean shutdown of both
 func ExampleQueueRunner_runHttpServer() {
@@ -72,43 +136,38 @@ func ExampleQueueRunner_runHttpServer() {
 		}
 	}()
 
-	q := tempo.NewQueueRunner(tempo.RunnerCfg{
-		Parallelism: 2,
-		QueueSize:   2,
-	})
-
-	// start in the background
-	q.StartBg()
-
 	port1, err := GetFreePort()
 	if err != nil {
 		panic(err)
 	}
-
-	// add the first server
-	_, err = q.Add(func(ctx context.Context) error {
-		err := httpServer(ctx, port1)
-		if err != nil {
-			panic(err)
-		}
-		return nil
-	}, "server1")
-	if err != nil {
-		panic(err)
-	}
-
-	// add the second server
 	port2, err := GetFreePort()
 	if err != nil {
 		panic(err)
 	}
-	_, err = q.Add(func(ctx context.Context) error {
-		err := httpServer(ctx, port2)
-		if err != nil {
-			panic(err)
-		}
-		return nil
-	}, "server2")
+	q, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 2,
+		QueueSize:   2,
+		Persistence: tempo.NewMemPersistence(),
+	})
+	if err != nil {
+		panic(err)
+	}
+	q.RegisterTask(tempo.TaskDef{
+		Name: "server1",
+		Run:  func(ctx context.Context) error { return httpServer(ctx, port1) },
+	})
+	q.RegisterTask(tempo.TaskDef{
+		Name: "server2",
+		Run:  func(ctx context.Context) error { return httpServer(ctx, port2) },
+	})
+
+	q.StartBg()
+
+	_, err = q.Add("server1")
+	if err != nil {
+		panic(err)
+	}
+	_, err = q.Add("server2")
 	if err != nil {
 		panic(err)
 	}
@@ -147,9 +206,29 @@ func ExampleQueueRunner_runHttpServer() {
 		panic("server should be stopped after shutdown")
 	}
 
-	// output:
-	//task "server1" in status running
+	// output (List returns tasks by queue time, newest first):
 	//task "server2" in status running
+	//task "server1" in status running
+}
+
+// ExampleGroupRunner demonstrates the config-free API: NewGroupRunner(), Add(TaskDef), Run(), Stop(ctx).
+func ExampleGroupRunner() {
+	rg := tempo.NewGroupRunner()
+	rg.Add(tempo.TaskDef{
+		Name: "worker",
+		Run: func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	go func() {
+		_ = rg.Stop(ctx)
+	}()
+	_ = rg.Run()
+	fmt.Println("group runner stopped")
+	// output: group runner stopped
 }
 
 // httpServer is a small helper function that stars a dummy http server on the given port
@@ -235,4 +314,187 @@ func testHttpRequest(port int) error {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// ExampleQueueRunner_filePersistenceAndRestart uses a file-backed persistence,
+// simulates a server restart (shutdown then new queue/runner loading from the same store),
+// and exercises concurrency (multiple goroutines adding tasks, parallel workers).
+func ExampleQueueRunner_filePersistenceAndRestart() {
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Printf("Example failed: %v", err)
+		}
+	}()
+
+	dir, err := os.MkdirTemp("", "tempo-example-*")
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	storePath := filepath.Join(dir, "tasks")
+	persist, err := newFilePersistence(storePath)
+	if err != nil {
+		panic(err)
+	}
+
+	runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 3,
+		QueueSize:   50,
+		HistorySize: 20,
+		Persistence: persist,
+	})
+	if err != nil {
+		panic(err)
+	}
+	runner.RegisterTask(tempo.TaskDef{
+		Name: "work",
+		Run: func(ctx context.Context) error {
+			time.Sleep(2 * time.Millisecond)
+			return nil
+		},
+	})
+	runner.StartBg()
+
+	// Concurrent adds from multiple goroutines
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for j := 0; j < 6; j++ {
+				_, _ = runner.Add("work")
+				time.Sleep(1 * time.Millisecond)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	time.Sleep(30 * time.Millisecond)
+	list1 := runner.List()
+	fmt.Printf("before shutdown: %d tasks\n", len(list1))
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err = runner.ShutDown(shutdownCtx)
+	cancel()
+	if err != nil {
+		panic(err)
+	}
+
+	// Simulate server restart: new queue loading from same file store, new runner
+	persist2, err := newFilePersistence(storePath)
+	if err != nil {
+		panic(err)
+	}
+	runner2, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 3,
+		QueueSize:   50,
+		HistorySize: 20,
+		Persistence: persist2,
+	})
+	if err != nil {
+		panic(err)
+	}
+	runner2.RegisterTask(tempo.TaskDef{
+		Name: "work",
+		Run: func(ctx context.Context) error {
+			time.Sleep(2 * time.Millisecond)
+			return nil
+		},
+	})
+	runner2.StartBg()
+
+	list2 := runner2.List()
+	fmt.Printf("after restart (recovered): %d tasks\n", len(list2))
+
+	// Add more tasks concurrently after restart
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 4; j++ {
+				_, _ = runner2.Add("work")
+			}
+		}()
+	}
+	wg.Wait()
+	time.Sleep(25 * time.Millisecond)
+
+	list3 := runner2.List()
+	fmt.Printf("after concurrent adds: %d tasks\n", len(list3))
+
+	shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = runner2.ShutDown(shutdownCtx2)
+	cancel2()
+
+	// Output lines (task counts depend on timing):
+	// before shutdown: N tasks
+	// after restart (recovered): N tasks
+	// after concurrent adds: M tasks
+}
+
+// filePersistence stores task state in a directory as one JSON file per task.
+// It implements tempo.TaskStatePersistence and tempo.RecoverablePersistence for the example.
+type filePersistence struct {
+	dir string
+	mu  sync.Mutex
+}
+
+func newFilePersistence(dir string) (*filePersistence, error) {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, err
+	}
+	return &filePersistence{dir: dir}, nil
+}
+
+func (f *filePersistence) path(id uuid.UUID) string {
+	return filepath.Join(f.dir, id.String()+".json")
+}
+
+func (f *filePersistence) SaveTask(ctx context.Context, task tempo.TaskInfo) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.path(task.ID)
+	data, err := json.Marshal(task)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o600)
+}
+
+func (f *filePersistence) RemoveTasks(ctx context.Context, ids []uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range ids {
+		_ = os.Remove(f.path(id))
+	}
+	return nil
+}
+
+func (f *filePersistence) List(ctx context.Context) ([]tempo.TaskInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entries, err := os.ReadDir(f.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []tempo.TaskInfo
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(f.dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var task tempo.TaskInfo
+		if err := json.Unmarshal(data, &task); err != nil {
+			continue
+		}
+		out = append(out, task)
+	}
+	return out, nil
 }
