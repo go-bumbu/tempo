@@ -20,30 +20,38 @@ go get github.com/go-bumbu/tempo
 ## Quick Start
 
 ```go
-    // Create a runner with 2 parallel workers and queue size of 10
-    runner := tempo.NewQueueRunner(tempo.RunnerCfg{
-        Parallelism: 2, QueueSize:   10, HistorySize: 10,
-    })
+runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+    Parallelism: 2, QueueSize: 10, HistorySize: 10,
+    Persistence: tempo.NewMemPersistence(),
+})
+if err != nil {
+    panic(err)
+}
 
-    // Start processing tasks in the background
-    runner.StartBg()
+type ScanParams struct {
+    Mode string `json:"mode"` // "normal" | "full"
+}
 
-    // Define a task
-    myTask := func(ctx context.Context) error {
-        fmt.Println("Executing task")
-        time.Sleep(100 * time.Millisecond) // Simulate work
-        return nil
-    }
+// register a typed task
+tempo.Register(runner, "scan", func(ctx context.Context, p ScanParams) error {
+    fmt.Printf("scan mode=%s\n", p.Mode)
+    return nil
+})
 
-    // Add the task to the queue
-    _, err := runner.Add(myTask, "my-task")
-    if err != nil {
-        fmt.Printf("Failed to add task: %v\n", err)
-    }
+runner.StartBg()
 
-    if err := runner.ShutDown(context.TODO()); err != nil {
-        fmt.Printf("Shutdown error: %v\n", err)
-    }
+// enqueue with typed params
+if _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
+    panic(err)
+}
+
+// or enqueue by name with a raw JSON payload (e.g. from an HTTP handler)
+if _, err := runner.AddRaw("scan", []byte(`{"mode":"normal"}`)); err != nil {
+    panic(err)
+}
+
+if err := runner.ShutDown(context.TODO()); err != nil {
+    panic(err)
 }
 ```
 

@@ -55,7 +55,7 @@ type RunnerCfg struct {
 	LogLevel slog.Level
 }
 
-// NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterTask to add task definitions. cfg.Persistence must not be nil.
+// NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterRaw or Register to add task definitions. cfg.Persistence must not be nil.
 func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 	if cfg.Persistence == nil {
 		return nil, errors.New("tempo: persistence must not be nil")
@@ -93,14 +93,6 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		r.taskLogger = slog.New(NewSinkHandler(cfg.LogSink, cfg.LogLevel))
 	}
 	return r, nil
-}
-
-// RegisterTask registers a param-less task definition (overwrites if present).
-func (r *QueueRunner) RegisterTask(def TaskDef) {
-	r.registry.add(def.Name, registered{
-		run:            func(ctx context.Context, _ []byte) error { return def.Run(ctx) },
-		maxParallelism: def.MaxParallelism,
-	})
 }
 
 // StartBg begins processing tasks from the store.
@@ -228,11 +220,6 @@ func (r *QueueRunner) autoClean() {
 			return
 		}
 	}
-}
-
-// Add enqueues a param-less task by name.
-func (r *QueueRunner) Add(name string) (uuid.UUID, error) {
-	return r.queue.Add(name, nil)
 }
 
 // List returns all tasks from the queue (e.g. for API display).

@@ -37,12 +37,9 @@ func ExampleQueueRunner() {
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
 		n := name
-		qrun.RegisterTask(tempo.TaskDef{
-			Name: name,
-			Run: func(ctx context.Context) error {
-				fmt.Printf("Executing task: %s\n", n)
-				return nil
-			},
+		qrun.RegisterRaw(name, func(ctx context.Context, _ []byte) error {
+			fmt.Printf("Executing task: %s\n", n)
+			return nil
 		})
 	}
 
@@ -50,7 +47,7 @@ func ExampleQueueRunner() {
 
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
-		_, err := qrun.Add(name)
+		_, err := qrun.AddRaw(name, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -91,19 +88,16 @@ func ExampleMemTaskLogSink() {
 		panic(err)
 	}
 
-	qrun.RegisterTask(tempo.TaskDef{
-		Name: "logged_task",
-		Run: func(ctx context.Context) error {
-			// "task started" and "task finished" are logged automatically by the runner
-			tempo.Logger(ctx).InfoContext(ctx, "step 1 done")
-			tempo.Logger(ctx).WarnContext(ctx, "optional step skipped")
-			return nil
-		},
+	qrun.RegisterRaw("logged_task", func(ctx context.Context, _ []byte) error {
+		// "task started" and "task finished" are logged automatically by the runner
+		tempo.Logger(ctx).InfoContext(ctx, "step 1 done")
+		tempo.Logger(ctx).WarnContext(ctx, "optional step skipped")
+		return nil
 	})
 
 	qrun.StartBg()
 
-	id, err := qrun.Add("logged_task")
+	id, err := qrun.AddRaw("logged_task", nil)
 	if err != nil {
 		panic(err)
 	}
@@ -152,22 +146,16 @@ func ExampleQueueRunner_runHttpServer() {
 	if err != nil {
 		panic(err)
 	}
-	q.RegisterTask(tempo.TaskDef{
-		Name: "server1",
-		Run:  func(ctx context.Context) error { return httpServer(ctx, port1) },
-	})
-	q.RegisterTask(tempo.TaskDef{
-		Name: "server2",
-		Run:  func(ctx context.Context) error { return httpServer(ctx, port2) },
-	})
+	q.RegisterRaw("server1", func(ctx context.Context, _ []byte) error { return httpServer(ctx, port1) })
+	q.RegisterRaw("server2", func(ctx context.Context, _ []byte) error { return httpServer(ctx, port2) })
 
 	q.StartBg()
 
-	_, err = q.Add("server1")
+	_, err = q.AddRaw("server1", nil)
 	if err != nil {
 		panic(err)
 	}
-	_, err = q.Add("server2")
+	_, err = q.AddRaw("server2", nil)
 	if err != nil {
 		panic(err)
 	}
@@ -347,12 +335,9 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	runner.RegisterTask(tempo.TaskDef{
-		Name: "work",
-		Run: func(ctx context.Context) error {
-			time.Sleep(2 * time.Millisecond)
-			return nil
-		},
+	runner.RegisterRaw("work", func(ctx context.Context, _ []byte) error {
+		time.Sleep(2 * time.Millisecond)
+		return nil
 	})
 	runner.StartBg()
 
@@ -363,7 +348,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		go func(worker int) {
 			defer wg.Done()
 			for j := 0; j < 6; j++ {
-				_, _ = runner.Add("work")
+				_, _ = runner.AddRaw("work", nil)
 				time.Sleep(1 * time.Millisecond)
 			}
 		}(i)
@@ -395,12 +380,9 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	runner2.RegisterTask(tempo.TaskDef{
-		Name: "work",
-		Run: func(ctx context.Context) error {
-			time.Sleep(2 * time.Millisecond)
-			return nil
-		},
+	runner2.RegisterRaw("work", func(ctx context.Context, _ []byte) error {
+		time.Sleep(2 * time.Millisecond)
+		return nil
 	})
 	runner2.StartBg()
 
@@ -413,7 +395,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 4; j++ {
-				_, _ = runner2.Add("work")
+				_, _ = runner2.AddRaw("work", nil)
 			}
 		}()
 	}
