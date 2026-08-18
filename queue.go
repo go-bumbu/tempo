@@ -45,7 +45,7 @@ func (s TaskStatus) Str() string {
 	}
 }
 
-// TaskInfo holds task metadata (id, name, status, times).
+// TaskInfo holds task metadata (id, name, status, times, and params payload).
 type TaskInfo struct {
 	ID        uuid.UUID
 	Name      string
@@ -195,8 +195,9 @@ func (q *TaskQueue) Add(name string, params []byte) (uuid.UUID, error) {
 	return id, nil
 }
 
-// NextTask returns the next task to run, atomically marking it Running.
-// Blocks until an eligible task exists or ctx is done. canClaim filters by task name.
+// NextTask returns the next task to run (id, name, and its params payload),
+// atomically marking it Running. Blocks until an eligible task exists or ctx
+// is done. canClaim filters by task name.
 func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) bool) (uuid.UUID, string, []byte, error) {
 	q.mu.Lock()
 	for {

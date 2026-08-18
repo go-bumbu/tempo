@@ -6,8 +6,7 @@ import (
 )
 
 // TaskDef defines how to run a task and optional per-task behavior.
-// It is the descriptor consumed by GroupRunner and by RegisterTask, which
-// adapts it into the internal erased registered form.
+// It is the param-less task descriptor consumed by GroupRunner.
 type TaskDef struct {
 	// Name identifies the task (used for registration and enqueueing).
 	Name string

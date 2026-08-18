@@ -32,12 +32,18 @@ func applyTaskOpts(opts []TaskOption) taskOpts {
 // RegisterRaw registers a handler that receives the raw parameter bytes.
 // Use it for tasks whose name/payload are known only at runtime, or that decode
 // the payload themselves. Overwrites any handler already registered for name.
+// tempo does not copy the params slice: callers must not mutate a slice passed
+// to AddRaw after the call, and raw handlers must not mutate the params slice
+// they receive.
 func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, params []byte) error, opts ...TaskOption) {
 	o := applyTaskOpts(opts)
 	r.registry.add(name, registered{run: fn, maxParallelism: o.maxParallelism})
 }
 
 // AddRaw enqueues a task by name with a raw parameter payload (may be nil).
+// tempo does not copy the params slice: callers must not mutate a slice passed
+// to AddRaw after the call, and raw handlers must not mutate the params slice
+// they receive.
 func (r *QueueRunner) AddRaw(name string, params []byte) (uuid.UUID, error) {
 	return r.queue.Add(name, params)
 }
