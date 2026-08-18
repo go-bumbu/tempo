@@ -102,8 +102,11 @@ func (g *GroupRunner) Run() error {
 	g.mu.Unlock()
 
 	for _, def := range tasks {
-		qr.RegisterTask(def)
-		if _, err := qr.Add(def.Name); err != nil {
+		run := def.Run // func(ctx) error, already wrapped for auto-Stop above
+		qr.RegisterRaw(def.Name, func(ctx context.Context, _ []byte) error {
+			return run(ctx)
+		}, WithMaxParallelism(1))
+		if _, err := qr.AddRaw(def.Name, nil); err != nil {
 			return err
 		}
 	}
