@@ -2,6 +2,8 @@ package tempo
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 )
@@ -38,4 +40,32 @@ func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, para
 // AddRaw enqueues a task by name with a raw parameter payload (may be nil).
 func (r *QueueRunner) AddRaw(name string, params []byte) (uuid.UUID, error) {
 	return r.queue.Add(name, params)
+}
+
+// Register registers a typed task handler. Parameters are JSON-decoded into T
+// before fn runs; an empty payload yields a zero-value T. T is inferred from fn.
+func Register[T any](r *QueueRunner, name string, fn func(ctx context.Context, params T) error, opts ...TaskOption) {
+	o := applyTaskOpts(opts)
+	r.registry.add(name, registered{
+		run: func(ctx context.Context, raw []byte) error {
+			var p T
+			if len(raw) > 0 {
+				if err := json.Unmarshal(raw, &p); err != nil {
+					return fmt.Errorf("tempo: decode params for task %q: %w", name, err)
+				}
+			}
+			return fn(ctx, p)
+		},
+		maxParallelism: o.maxParallelism,
+	})
+}
+
+// Enqueue enqueues a task by name with typed parameters, JSON-encoded. T is
+// inferred from params.
+func Enqueue[T any](r *QueueRunner, name string, params T) (uuid.UUID, error) {
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("tempo: encode params for task %q: %w", name, err)
+	}
+	return r.queue.Add(name, raw)
 }
