@@ -95,9 +95,12 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 	return r, nil
 }
 
-// RegisterTask registers a task definition (overwrites if present). Def.Name is the task name.
+// RegisterTask registers a param-less task definition (overwrites if present).
 func (r *QueueRunner) RegisterTask(def TaskDef) {
-	r.registry.add(def)
+	r.registry.add(def.Name, registered{
+		run:            func(ctx context.Context, _ []byte) error { return def.Run(ctx) },
+		maxParallelism: def.MaxParallelism,
+	})
 }
 
 // StartBg begins processing tasks from the store.
@@ -120,7 +123,7 @@ func (r *QueueRunner) StartBg() {
 			defer r.wg.Done()
 			for {
 				canClaim := r.buildCanClaim()
-				id, name, err := r.queue.NextTask(r.ctx, canClaim)
+				id, name, params, err := r.queue.NextTask(r.ctx, canClaim)
 				if err != nil {
 					return
 				}
@@ -129,7 +132,7 @@ func (r *QueueRunner) StartBg() {
 				r.runningCount[name]++
 				r.runMu.Unlock()
 
-				def, ok := r.registry.lookup(name)
+				entry, ok := r.registry.lookup(name)
 				if !ok {
 					_ = r.queue.SetStatus(context.Background(), id, TaskStatusFailed, time.Time{}, time.Now())
 					r.decrRunningCount(name)
@@ -163,7 +166,7 @@ func (r *QueueRunner) StartBg() {
 							r.appendTaskLog(childCtx, id, "ERROR", fmt.Sprint(recVal))
 						}
 					}()
-					taskErr := def.Run(childCtx)
+					taskErr := entry.run(childCtx, params)
 					finalEndedAt = time.Now()
 					if taskErr == nil {
 						finalStatus = TaskStatusComplete
@@ -192,17 +195,17 @@ func (r *QueueRunner) appendTaskLog(ctx context.Context, id uuid.UUID, level str
 
 func (r *QueueRunner) buildCanClaim() func(name string) bool {
 	return func(name string) bool {
-		def, ok := r.registry.lookup(name)
+		entry, ok := r.registry.lookup(name)
 		if !ok {
 			return true
 		}
-		if def.MaxParallelism == 0 {
+		if entry.maxParallelism == 0 {
 			return true
 		}
 		r.runMu.Lock()
 		n := r.runningCount[name]
 		r.runMu.Unlock()
-		return n < def.MaxParallelism
+		return n < entry.maxParallelism
 	}
 }
 
@@ -227,9 +230,9 @@ func (r *QueueRunner) autoClean() {
 	}
 }
 
-// Add enqueues a task by name. The runner will look up the function from the registry when it runs.
+// Add enqueues a param-less task by name.
 func (r *QueueRunner) Add(name string) (uuid.UUID, error) {
-	return r.queue.Add(name)
+	return r.queue.Add(name, nil)
 }
 
 // List returns all tasks from the queue (e.g. for API display).

@@ -24,7 +24,7 @@ func TestQueueAdd(t *testing.T) {
 	t.Run("basic add operations", func(t *testing.T) {
 		tq := newTestQueue(10)
 
-		id, err := tq.Add(myActionName)
+		id, err := tq.Add(myActionName, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -34,7 +34,7 @@ func TestQueueAdd(t *testing.T) {
 
 		ids := make(map[uuid.UUID]bool)
 		for i := 0; i < 5; i++ {
-			id, err := tq.Add(myActionName)
+			id, err := tq.Add(myActionName, nil)
 			if err != nil {
 				t.Fatalf("error adding task %d: %v", i, err)
 			}
@@ -54,12 +54,12 @@ func TestQueueAdd(t *testing.T) {
 		tq := newTestQueue(3)
 
 		for i := 0; i < 3; i++ {
-			if _, err := tq.Add(myActionName); err != nil {
+			if _, err := tq.Add(myActionName, nil); err != nil {
 				t.Fatalf("error at task %d: %v", i, err)
 			}
 		}
 
-		_, err := tq.Add(myActionName)
+		_, err := tq.Add(myActionName, nil)
 		if !errors.Is(err, ErrQueueFull) {
 			t.Errorf("expected ErrQueueFull, got: %v", err)
 		}
@@ -74,7 +74,7 @@ func TestQueueAdd(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, _ = tq.Add(myActionName)
+				_, _ = tq.Add(myActionName, nil)
 			}()
 		}
 		wg.Wait()
@@ -99,7 +99,7 @@ func TestQueueList(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		_, _ = tq.Add(myActionName)
+		_, _ = tq.Add(myActionName, nil)
 	}
 
 	list, err = tq.List(ctx)
@@ -137,7 +137,7 @@ func TestQueueGet(t *testing.T) {
 	tq := newTestQueue(10)
 
 	for i := 0; i < 3; i++ {
-		_, _ = tq.Add(myActionName)
+		_, _ = tq.Add(myActionName, nil)
 	}
 
 	list, _ := tq.List(ctx)
@@ -183,8 +183,8 @@ func countStatus(list []TaskInfo, status TaskStatus) int {
 func TestQueueCleanHistoryNoTerminalTasks(t *testing.T) {
 	ctx := context.Background()
 	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 1})
-	_, _ = tq.Add("a")
-	_, _ = tq.Add("b")
+	_, _ = tq.Add("a", nil)
+	_, _ = tq.Add("b", nil)
 	_ = tq.CleanHistory(ctx, 1)
 	list, _ := tq.List(ctx)
 	if len(list) != 2 {
@@ -195,9 +195,9 @@ func TestQueueCleanHistoryNoTerminalTasks(t *testing.T) {
 func TestQueueCleanHistoryLessThanMaxDone(t *testing.T) {
 	ctx := context.Background()
 	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 3})
-	_, _ = tq.Add("a")
-	_, _ = tq.Add("b")
-	_, _ = tq.Add("c")
+	_, _ = tq.Add("a", nil)
+	_, _ = tq.Add("b", nil)
+	_, _ = tq.Add("c", nil)
 	list, _ := tq.List(ctx)
 	for _, task := range list {
 		if task.Name == "a" {
@@ -218,7 +218,7 @@ func TestQueueCleanHistoryMoreThanMaxDone(t *testing.T) {
 	ctx := context.Background()
 	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 2})
 	for i := 0; i < 5; i++ {
-		_, _ = tq.Add(fmt.Sprintf("task-%d", i))
+		_, _ = tq.Add(fmt.Sprintf("task-%d", i), nil)
 	}
 	list, _ := tq.List(ctx)
 	for _, task := range list {
@@ -250,7 +250,7 @@ func TestQueueCleanHistoryMixPreservesOrder(t *testing.T) {
 	ctx := context.Background()
 	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 2})
 	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
-		_, _ = tq.Add(name)
+		_, _ = tq.Add(name, nil)
 	}
 	list, _ := tq.List(ctx)
 	for _, task := range list {
@@ -292,18 +292,18 @@ func TestQueueUnblock(t *testing.T) {
 	tq.UnblockAll()
 	tq.UnblockAll()
 
-	if _, err := tq.Add(myActionName); err != nil {
+	if _, err := tq.Add(myActionName, nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := tq.NextTask(ctx, nil)
+		_, _, _, err := tq.NextTask(ctx, nil)
 		done <- err
 	}()
 
 	time.Sleep(10 * time.Millisecond)
-	_, _ = tq.Add(myActionName)
+	_, _ = tq.Add(myActionName, nil)
 	tq.UnblockAll()
 
 	select {
@@ -322,7 +322,7 @@ func TestQueueConcurrency(t *testing.T) {
 		tq := newTestQueue(200)
 		numTasks := 10
 		for i := 0; i < numTasks; i++ {
-			_, _ = tq.Add(myActionName)
+			_, _ = tq.Add(myActionName, nil)
 		}
 
 		var wg sync.WaitGroup
@@ -330,7 +330,7 @@ func TestQueueConcurrency(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, _ = tq.Add(myActionName)
+				_, _ = tq.Add(myActionName, nil)
 			}()
 			wg.Add(1)
 			go func() {
@@ -350,7 +350,7 @@ func TestQueueConcurrency(t *testing.T) {
 		tq := newTestQueue(100)
 		ids := make([]uuid.UUID, 10)
 		for i := range ids {
-			ids[i], _ = tq.Add(myActionName)
+			ids[i], _ = tq.Add(myActionName, nil)
 		}
 
 		var wg sync.WaitGroup
@@ -391,7 +391,7 @@ func TestQueueEdgeCases(t *testing.T) {
 		tq := newTestQueue(10)
 		numTasks := 5
 		for i := 0; i < numTasks; i++ {
-			_, _ = tq.Add(myActionName)
+			_, _ = tq.Add(myActionName, nil)
 		}
 
 		list, _ := tq.List(ctx)
@@ -410,11 +410,11 @@ func TestQueueEdgeCases(t *testing.T) {
 			t.Run(fmt.Sprintf("capacity_%d", capacity), func(t *testing.T) {
 				tq := newTestQueue(capacity)
 				for i := 0; i < capacity; i++ {
-					if _, err := tq.Add(myActionName); err != nil {
+					if _, err := tq.Add(myActionName, nil); err != nil {
 						t.Fatalf("error at task %d: %v", i, err)
 					}
 				}
-				if _, err := tq.Add(myActionName); !errors.Is(err, ErrQueueFull) {
+				if _, err := tq.Add(myActionName, nil); !errors.Is(err, ErrQueueFull) {
 					t.Errorf("expected ErrQueueFull, got: %v", err)
 				}
 			})
@@ -428,7 +428,7 @@ func TestQueueEE2E(t *testing.T) {
 		tq := newTestQueue(20)
 		addedIDs := make([]uuid.UUID, 10)
 		for i := range addedIDs {
-			addedIDs[i], _ = tq.Add(myActionName)
+			addedIDs[i], _ = tq.Add(myActionName, nil)
 		}
 
 		list, _ := tq.List(ctx)
@@ -455,7 +455,7 @@ func TestQueueEE2E(t *testing.T) {
 		capacity := 15
 		tq := newTestQueue(capacity)
 		for i := 0; i < capacity; i++ {
-			if _, err := tq.Add(myActionName); err != nil {
+			if _, err := tq.Add(myActionName, nil); err != nil {
 				t.Fatalf("error at task %d: %v", i, err)
 			}
 		}
@@ -464,8 +464,94 @@ func TestQueueEE2E(t *testing.T) {
 		if len(list) != capacity {
 			t.Errorf("unexpected count: got %d want %d", len(list), capacity)
 		}
-		if _, err := tq.Add(myActionName); err == nil {
+		if _, err := tq.Add(myActionName, nil); err == nil {
 			t.Error("expected error when adding to full TaskQueue")
 		}
 	})
+}
+
+func TestQueueParamsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	tq := newTestQueue(10)
+	payload := []byte(`{"mode":"full"}`)
+
+	id, err := tq.Add("scan", payload)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	info, err := tq.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(info.Params) != string(payload) {
+		t.Errorf("Get params: got %q want %q", info.Params, payload)
+	}
+
+	gotID, name, params, err := tq.NextTask(ctx, nil)
+	if err != nil {
+		t.Fatalf("NextTask: %v", err)
+	}
+	if gotID != id || name != "scan" {
+		t.Errorf("NextTask id/name: got %v/%q", gotID, name)
+	}
+	if string(params) != string(payload) {
+		t.Errorf("NextTask params: got %q want %q", params, payload)
+	}
+}
+
+type recoverableMemPersistence struct {
+	mu    sync.Mutex
+	tasks map[uuid.UUID]TaskInfo
+}
+
+func newRecoverableMemPersistence() *recoverableMemPersistence {
+	return &recoverableMemPersistence{tasks: make(map[uuid.UUID]TaskInfo)}
+}
+
+func (m *recoverableMemPersistence) SaveTask(ctx context.Context, t TaskInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasks[t.ID] = t
+	return nil
+}
+
+func (m *recoverableMemPersistence) RemoveTasks(ctx context.Context, ids []uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range ids {
+		delete(m.tasks, id)
+	}
+	return nil
+}
+
+func (m *recoverableMemPersistence) List(ctx context.Context) ([]TaskInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]TaskInfo, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+func TestQueueParamsRecovered(t *testing.T) {
+	ctx := context.Background()
+	persist := newRecoverableMemPersistence()
+
+	tq1 := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 10, Persistence: persist})
+	id, err := tq1.Add("scan", []byte(`{"mode":"full"}`))
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// New queue from the same persistence simulates a restart.
+	tq2 := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 10, Persistence: persist})
+	info, err := tq2.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after recovery: %v", err)
+	}
+	if string(info.Params) != `{"mode":"full"}` {
+		t.Errorf("recovered params: got %q", info.Params)
+	}
 }
