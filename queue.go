@@ -45,7 +45,7 @@ func (s TaskStatus) Str() string {
 	}
 }
 
-// TaskInfo holds task metadata (id, name, status, times).
+// TaskInfo holds task metadata (id, name, status, times, and params payload).
 type TaskInfo struct {
 	ID        uuid.UUID
 	Name      string
@@ -53,6 +53,7 @@ type TaskInfo struct {
 	QueuedAt  time.Time
 	StartedAt time.Time
 	EndedAt   time.Time
+	Params    []byte
 }
 
 var ErrTaskNotFound = errors.New("task not found")
@@ -115,6 +116,7 @@ type taskRecord struct {
 	queuedAt  time.Time
 	startedAt time.Time
 	endedAt   time.Time
+	params    []byte
 }
 
 // TaskQueue holds the main logic for managing the task queue: concurrent atomic
@@ -163,6 +165,7 @@ func NewTaskQueue(cfg TaskQueueCfg) *TaskQueue {
 					queuedAt:  info.QueuedAt,
 					startedAt: info.StartedAt,
 					endedAt:   info.EndedAt,
+					params:    info.Params,
 				})
 			}
 		}
@@ -170,8 +173,8 @@ func NewTaskQueue(cfg TaskQueueCfg) *TaskQueue {
 	return q
 }
 
-// Add enqueues a task by name. Returns the new task id or ErrQueueFull.
-func (q *TaskQueue) Add(name string) (uuid.UUID, error) {
+// Add enqueues a task by name with an opaque payload. Returns the new task id or ErrQueueFull.
+func (q *TaskQueue) Add(name string, params []byte) (uuid.UUID, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.countStatusUnsafe(TaskStatusWaiting) >= q.maxWaiting {
@@ -184,6 +187,7 @@ func (q *TaskQueue) Add(name string) (uuid.UUID, error) {
 		name:     name,
 		status:   TaskStatusWaiting,
 		queuedAt: now,
+		params:   params,
 	}
 	q.tasks = append(q.tasks, t)
 	_ = q.persist.SaveTask(context.Background(), q.recordToInfo(t))
@@ -191,9 +195,10 @@ func (q *TaskQueue) Add(name string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// NextTask returns the next task to run, atomically marking it Running.
-// Blocks until an eligible task exists or ctx is done. canClaim filters by task name.
-func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) bool) (uuid.UUID, string, error) {
+// NextTask returns the next task to run (id, name, and its params payload),
+// atomically marking it Running. Blocks until an eligible task exists or ctx
+// is done. canClaim filters by task name.
+func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) bool) (uuid.UUID, string, []byte, error) {
 	q.mu.Lock()
 	for {
 		for _, t := range q.tasks {
@@ -206,14 +211,14 @@ func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) boo
 			t.status = TaskStatusRunning
 			t.startedAt = time.Now()
 			_ = q.persist.SaveTask(context.Background(), q.recordToInfo(t))
-			id, name := t.id, t.name
+			id, name, params := t.id, t.name, t.params
 			q.mu.Unlock()
-			return id, name, nil
+			return id, name, params, nil
 		}
 		select {
 		case <-ctx.Done():
 			q.mu.Unlock()
-			return uuid.Nil, "", ctx.Err()
+			return uuid.Nil, "", nil, ctx.Err()
 		default:
 			q.cond.Wait()
 		}
@@ -311,6 +316,7 @@ func (q *TaskQueue) recordToInfo(t *taskRecord) TaskInfo {
 		QueuedAt:  t.queuedAt,
 		StartedAt: t.startedAt,
 		EndedAt:   t.endedAt,
+		Params:    t.params,
 	}
 }
 

@@ -49,7 +49,6 @@ func NewGroupRunner() *GroupRunner {
 func (g *GroupRunner) Add(def TaskDef) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	def.MaxParallelism = 1 // GroupRunner only allows one execution
 	g.tasks = append(g.tasks, def)
 }
 
@@ -102,8 +101,11 @@ func (g *GroupRunner) Run() error {
 	g.mu.Unlock()
 
 	for _, def := range tasks {
-		qr.RegisterTask(def)
-		if _, err := qr.Add(def.Name); err != nil {
+		run := def.Run // func(ctx) error, already wrapped for auto-Stop above
+		qr.RegisterRaw(def.Name, func(ctx context.Context, _ []byte) error {
+			return run(ctx)
+		}, WithMaxParallelism(1)) // GroupRunner allows a single execution per task
+		if _, err := qr.AddRaw(def.Name, nil); err != nil {
 			return err
 		}
 	}

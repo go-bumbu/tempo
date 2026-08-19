@@ -37,12 +37,9 @@ func ExampleQueueRunner() {
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
 		n := name
-		qrun.RegisterTask(tempo.TaskDef{
-			Name: name,
-			Run: func(ctx context.Context) error {
-				fmt.Printf("Executing task: %s\n", n)
-				return nil
-			},
+		qrun.RegisterRaw(name, func(ctx context.Context, _ []byte) error {
+			fmt.Printf("Executing task: %s\n", n)
+			return nil
 		})
 	}
 
@@ -50,7 +47,7 @@ func ExampleQueueRunner() {
 
 	for i := range 5 {
 		name := fmt.Sprintf("task_%d", i)
-		_, err := qrun.Add(name)
+		_, err := qrun.AddRaw(name, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -91,19 +88,16 @@ func ExampleMemTaskLogSink() {
 		panic(err)
 	}
 
-	qrun.RegisterTask(tempo.TaskDef{
-		Name: "logged_task",
-		Run: func(ctx context.Context) error {
-			// "task started" and "task finished" are logged automatically by the runner
-			tempo.Logger(ctx).InfoContext(ctx, "step 1 done")
-			tempo.Logger(ctx).WarnContext(ctx, "optional step skipped")
-			return nil
-		},
+	qrun.RegisterRaw("logged_task", func(ctx context.Context, _ []byte) error {
+		// "task started" and "task finished" are logged automatically by the runner
+		tempo.Logger(ctx).InfoContext(ctx, "step 1 done")
+		tempo.Logger(ctx).WarnContext(ctx, "optional step skipped")
+		return nil
 	})
 
 	qrun.StartBg()
 
-	id, err := qrun.Add("logged_task")
+	id, err := qrun.AddRaw("logged_task", nil)
 	if err != nil {
 		panic(err)
 	}
@@ -152,22 +146,16 @@ func ExampleQueueRunner_runHttpServer() {
 	if err != nil {
 		panic(err)
 	}
-	q.RegisterTask(tempo.TaskDef{
-		Name: "server1",
-		Run:  func(ctx context.Context) error { return httpServer(ctx, port1) },
-	})
-	q.RegisterTask(tempo.TaskDef{
-		Name: "server2",
-		Run:  func(ctx context.Context) error { return httpServer(ctx, port2) },
-	})
+	q.RegisterRaw("server1", func(ctx context.Context, _ []byte) error { return httpServer(ctx, port1) })
+	q.RegisterRaw("server2", func(ctx context.Context, _ []byte) error { return httpServer(ctx, port2) })
 
 	q.StartBg()
 
-	_, err = q.Add("server1")
+	_, err = q.AddRaw("server1", nil)
 	if err != nil {
 		panic(err)
 	}
-	_, err = q.Add("server2")
+	_, err = q.AddRaw("server2", nil)
 	if err != nil {
 		panic(err)
 	}
@@ -229,6 +217,86 @@ func ExampleGroupRunner() {
 	_ = rg.Run()
 	fmt.Println("group runner stopped")
 	// output: group runner stopped
+}
+
+// ExampleQueueRunner_perTaskParallelism shows two typed tasks sharing one
+// runner with different per-task concurrency caps. "scan" (full or partial) is
+// capped at one at a time, so the two scans run sequentially — the full scan
+// starts only once the partial scan finishes. "generate-thumb" is capped at
+// three, so the thumbnails run concurrently, alongside the running scan.
+//
+// The sleep durations make the completion order deterministic (so the example
+// is not flaky): each thumbnail does short, staggered work and finishes while
+// the first scan is still running; the scans do longer work and finish last,
+// one after the other.
+func ExampleQueueRunner_perTaskParallelism() {
+	runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 5, // the runner itself allows five tasks at once
+		QueueSize:   20,
+		Persistence: tempo.NewMemPersistence(),
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	type ScanParams struct {
+		Mode string `json:"mode"` // "full" or "partial"
+	}
+	type ThumbParams struct {
+		ImageID string `json:"image_id"`
+		WorkMS  int    `json:"work_ms"` // simulated work; staggered for a stable order
+	}
+
+	var wg sync.WaitGroup
+
+	// "scan" may run only one at a time; each scan takes ~150ms.
+	tempo.Register(runner, "scan", func(ctx context.Context, p ScanParams) error {
+		defer wg.Done()
+		time.Sleep(150 * time.Millisecond)
+		fmt.Printf("scan: %s\n", p.Mode)
+		return nil
+	}, tempo.WithMaxParallelism(1))
+
+	// "generate-thumb" may run up to three at once; each does short, quick work.
+	tempo.Register(runner, "generate-thumb", func(ctx context.Context, p ThumbParams) error {
+		defer wg.Done()
+		time.Sleep(time.Duration(p.WorkMS) * time.Millisecond)
+		fmt.Printf("thumb: %s\n", p.ImageID)
+		return nil
+	}, tempo.WithMaxParallelism(3))
+
+	runner.StartBg()
+
+	wg.Add(5)
+	// The partial scan and three thumbnails start together (one scan slot +
+	// three thumb slots). The full scan is enqueued last and waits — scan is
+	// capped at one — so it runs only after the partial scan completes.
+	if _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "partial"}); err != nil {
+		panic(err)
+	}
+	for _, th := range []ThumbParams{{ImageID: "a", WorkMS: 30}, {ImageID: "b", WorkMS: 60}, {ImageID: "c", WorkMS: 90}} {
+		if _, err := tempo.Enqueue(runner, "generate-thumb", th); err != nil {
+			panic(err)
+		}
+	}
+	if _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
+		panic(err)
+	}
+
+	wg.Wait() // wait for all tasks to finish before shutting down
+	if err := runner.ShutDown(context.Background()); err != nil {
+		panic(err)
+	}
+
+	// The thumbnails (short, parallel work) finish first; the scans run
+	// sequentially and finish last — partial before full.
+
+	// Output:
+	// thumb: a
+	// thumb: b
+	// thumb: c
+	// scan: partial
+	// scan: full
 }
 
 // httpServer is a small helper function that stars a dummy http server on the given port
@@ -347,12 +415,9 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	runner.RegisterTask(tempo.TaskDef{
-		Name: "work",
-		Run: func(ctx context.Context) error {
-			time.Sleep(2 * time.Millisecond)
-			return nil
-		},
+	runner.RegisterRaw("work", func(ctx context.Context, _ []byte) error {
+		time.Sleep(2 * time.Millisecond)
+		return nil
 	})
 	runner.StartBg()
 
@@ -363,7 +428,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		go func(worker int) {
 			defer wg.Done()
 			for j := 0; j < 6; j++ {
-				_, _ = runner.Add("work")
+				_, _ = runner.AddRaw("work", nil)
 				time.Sleep(1 * time.Millisecond)
 			}
 		}(i)
@@ -395,12 +460,9 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	runner2.RegisterTask(tempo.TaskDef{
-		Name: "work",
-		Run: func(ctx context.Context) error {
-			time.Sleep(2 * time.Millisecond)
-			return nil
-		},
+	runner2.RegisterRaw("work", func(ctx context.Context, _ []byte) error {
+		time.Sleep(2 * time.Millisecond)
+		return nil
 	})
 	runner2.StartBg()
 
@@ -413,7 +475,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 4; j++ {
-				_, _ = runner2.Add("work")
+				_, _ = runner2.AddRaw("work", nil)
 			}
 		}()
 	}

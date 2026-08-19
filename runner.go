@@ -55,7 +55,7 @@ type RunnerCfg struct {
 	LogLevel slog.Level
 }
 
-// NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterTask to add task definitions. cfg.Persistence must not be nil.
+// NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterRaw or Register to add task definitions. cfg.Persistence must not be nil.
 func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 	if cfg.Persistence == nil {
 		return nil, errors.New("tempo: persistence must not be nil")
@@ -95,11 +95,6 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 	return r, nil
 }
 
-// RegisterTask registers a task definition (overwrites if present). Def.Name is the task name.
-func (r *QueueRunner) RegisterTask(def TaskDef) {
-	r.registry.add(def)
-}
-
 // StartBg begins processing tasks from the store.
 // The wait group count is added upfront so ShutDown can safely call Wait without racing with Add.
 // ShutDown must not be called until StartBg has returned (startDone enforces this).
@@ -120,7 +115,7 @@ func (r *QueueRunner) StartBg() {
 			defer r.wg.Done()
 			for {
 				canClaim := r.buildCanClaim()
-				id, name, err := r.queue.NextTask(r.ctx, canClaim)
+				id, name, params, err := r.queue.NextTask(r.ctx, canClaim)
 				if err != nil {
 					return
 				}
@@ -129,7 +124,7 @@ func (r *QueueRunner) StartBg() {
 				r.runningCount[name]++
 				r.runMu.Unlock()
 
-				def, ok := r.registry.lookup(name)
+				entry, ok := r.registry.lookup(name)
 				if !ok {
 					_ = r.queue.SetStatus(context.Background(), id, TaskStatusFailed, time.Time{}, time.Now())
 					r.decrRunningCount(name)
@@ -163,7 +158,7 @@ func (r *QueueRunner) StartBg() {
 							r.appendTaskLog(childCtx, id, "ERROR", fmt.Sprint(recVal))
 						}
 					}()
-					taskErr := def.Run(childCtx)
+					taskErr := entry.run(childCtx, params)
 					finalEndedAt = time.Now()
 					if taskErr == nil {
 						finalStatus = TaskStatusComplete
@@ -192,17 +187,17 @@ func (r *QueueRunner) appendTaskLog(ctx context.Context, id uuid.UUID, level str
 
 func (r *QueueRunner) buildCanClaim() func(name string) bool {
 	return func(name string) bool {
-		def, ok := r.registry.lookup(name)
+		entry, ok := r.registry.lookup(name)
 		if !ok {
 			return true
 		}
-		if def.MaxParallelism == 0 {
+		if entry.maxParallelism == 0 {
 			return true
 		}
 		r.runMu.Lock()
 		n := r.runningCount[name]
 		r.runMu.Unlock()
-		return n < def.MaxParallelism
+		return n < entry.maxParallelism
 	}
 }
 
@@ -225,11 +220,6 @@ func (r *QueueRunner) autoClean() {
 			return
 		}
 	}
-}
-
-// Add enqueues a task by name. The runner will look up the function from the registry when it runs.
-func (r *QueueRunner) Add(name string) (uuid.UUID, error) {
-	return r.queue.Add(name)
 }
 
 // List returns all tasks from the queue (e.g. for API display).
