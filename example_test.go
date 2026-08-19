@@ -219,6 +219,86 @@ func ExampleGroupRunner() {
 	// output: group runner stopped
 }
 
+// ExampleQueueRunner_perTaskParallelism shows two typed tasks sharing one
+// runner with different per-task concurrency caps. "scan" (full or partial) is
+// capped at one at a time, so the two scans run sequentially — the full scan
+// starts only once the partial scan finishes. "generate-thumb" is capped at
+// three, so the thumbnails run concurrently, alongside the running scan.
+//
+// The sleep durations make the completion order deterministic (so the example
+// is not flaky): each thumbnail does short, staggered work and finishes while
+// the first scan is still running; the scans do longer work and finish last,
+// one after the other.
+func ExampleQueueRunner_perTaskParallelism() {
+	runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 5, // the runner itself allows five tasks at once
+		QueueSize:   20,
+		Persistence: tempo.NewMemPersistence(),
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	type ScanParams struct {
+		Mode string `json:"mode"` // "full" or "partial"
+	}
+	type ThumbParams struct {
+		ImageID string `json:"image_id"`
+		WorkMS  int    `json:"work_ms"` // simulated work; staggered for a stable order
+	}
+
+	var wg sync.WaitGroup
+
+	// "scan" may run only one at a time; each scan takes ~150ms.
+	tempo.Register(runner, "scan", func(ctx context.Context, p ScanParams) error {
+		defer wg.Done()
+		time.Sleep(150 * time.Millisecond)
+		fmt.Printf("scan: %s\n", p.Mode)
+		return nil
+	}, tempo.WithMaxParallelism(1))
+
+	// "generate-thumb" may run up to three at once; each does short, quick work.
+	tempo.Register(runner, "generate-thumb", func(ctx context.Context, p ThumbParams) error {
+		defer wg.Done()
+		time.Sleep(time.Duration(p.WorkMS) * time.Millisecond)
+		fmt.Printf("thumb: %s\n", p.ImageID)
+		return nil
+	}, tempo.WithMaxParallelism(3))
+
+	runner.StartBg()
+
+	wg.Add(5)
+	// The partial scan and three thumbnails start together (one scan slot +
+	// three thumb slots). The full scan is enqueued last and waits — scan is
+	// capped at one — so it runs only after the partial scan completes.
+	if _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "partial"}); err != nil {
+		panic(err)
+	}
+	for _, th := range []ThumbParams{{ImageID: "a", WorkMS: 30}, {ImageID: "b", WorkMS: 60}, {ImageID: "c", WorkMS: 90}} {
+		if _, err := tempo.Enqueue(runner, "generate-thumb", th); err != nil {
+			panic(err)
+		}
+	}
+	if _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
+		panic(err)
+	}
+
+	wg.Wait() // wait for all tasks to finish before shutting down
+	if err := runner.ShutDown(context.Background()); err != nil {
+		panic(err)
+	}
+
+	// The thumbnails (short, parallel work) finish first; the scans run
+	// sequentially and finish last — partial before full.
+
+	// Output:
+	// thumb: a
+	// thumb: b
+	// thumb: c
+	// scan: partial
+	// scan: full
+}
+
 // httpServer is a small helper function that stars a dummy http server on the given port
 // if the context is terminated, it will shut down the server
 func httpServer(ctx context.Context, port int) error {

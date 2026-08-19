@@ -6,6 +6,17 @@
 *.so
 *.dylib
 
+
+# FS
+.directory
+
+
+# AI stuff
+.playwright-mcp/
+docs/superpowers
+.superpowers
+
+
 # Test binary, build with `go test -c`
 *.test
 
