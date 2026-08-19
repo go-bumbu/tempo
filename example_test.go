@@ -199,26 +199,6 @@ func ExampleQueueRunner_runHttpServer() {
 	//task "server1" in status running
 }
 
-// ExampleGroupRunner demonstrates the config-free API: NewGroupRunner(), Add(TaskDef), Run(), Stop(ctx).
-func ExampleGroupRunner() {
-	rg := tempo.NewGroupRunner()
-	rg.Add(tempo.TaskDef{
-		Name: "worker",
-		Run: func(ctx context.Context) error {
-			<-ctx.Done()
-			return ctx.Err()
-		},
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	go func() {
-		_ = rg.Stop(ctx)
-	}()
-	_ = rg.Run()
-	fmt.Println("group runner stopped")
-	// output: group runner stopped
-}
-
 // ExampleQueueRunner_perTaskParallelism shows two typed tasks sharing one
 // runner with different per-task concurrency caps. "scan" (full or partial) is
 // capped at one at a time, so the two scans run sequentially — the full scan
