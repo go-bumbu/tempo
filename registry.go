@@ -5,18 +5,6 @@ import (
 	"sync"
 )
 
-// TaskDef defines how to run a task and optional per-task behavior.
-// It is the param-less task descriptor consumed by GroupRunner.
-type TaskDef struct {
-	// Name identifies the task (used for registration and enqueueing).
-	Name string
-	// Run is the function to execute for this task.
-	Run func(ctx context.Context) error
-	// MaxParallelism is the max number of this task name that may run at once.
-	// 0 means no per-task limit (use runner default).
-	MaxParallelism int
-}
-
 // registered is the internal, erased form of a task handler stored in the registry.
 type registered struct {
 	run            func(ctx context.Context, params []byte) error
