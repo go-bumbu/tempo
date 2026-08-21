@@ -74,6 +74,49 @@ func TestRegisterRawMaxParallelism(t *testing.T) {
 	})
 }
 
+// TestRegisterRawOverwriteWins guards the documented "overwrites any handler
+// already registered for name" behavior of RegisterRaw.
+func TestRegisterRawOverwriteWins(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ran := make(chan string, 1)
+		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
+		r.RegisterRaw("x", func(ctx context.Context, _ []byte) error { ran <- "first"; return nil })
+		r.RegisterRaw("x", func(ctx context.Context, _ []byte) error { ran <- "second"; return nil })
+		r.StartBg()
+		if _, err := r.AddRaw("x", nil); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1 * time.Minute)
+		_ = r.ShutDown(context.Background())
+
+		select {
+		case got := <-ran:
+			if got != "second" {
+				t.Errorf("expected the second registration to win, got %q", got)
+			}
+		default:
+			t.Fatal("handler did not run")
+		}
+	})
+}
+
+// TestEnqueueMarshalError guards that a payload that cannot be JSON-encoded
+// fails the enqueue up front, rather than queueing a task that can never decode.
+func TestEnqueueMarshalError(t *testing.T) {
+	r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
+	// A channel has no JSON representation.
+	id, err := tempo.Enqueue(r, "x", make(chan int))
+	if err == nil {
+		t.Fatal("expected a marshal error")
+	}
+	if id != uuid.Nil {
+		t.Errorf("expected uuid.Nil on marshal error, got %v", id)
+	}
+	if got := len(r.List()); got != 0 {
+		t.Errorf("expected nothing queued after a marshal error, got %d", got)
+	}
+}
+
 type scanParams struct {
 	Mode string `json:"mode"`
 }
