@@ -48,6 +48,14 @@ type Scheduler struct {
 	mu      sync.Mutex
 	started atomic.Bool
 
+	// life bounds the quartz scheduler's execution loop. It is rooted at
+	// context.Background() rather than at Start's argument on purpose: go-quartz
+	// stops firing as soon as the context it was started with is done, and a
+	// caller's per-call ctx must not be able to kill the Scheduler behind its
+	// back. Only ShutDown ends it.
+	life       context.Context
+	lifeCancel context.CancelFunc
+
 	stopOnce sync.Once
 	stopChan chan struct{}
 }
@@ -73,6 +81,7 @@ func New(cfg Cfg) (*Scheduler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("schedule: create quartz scheduler: %w", err)
 	}
+	life, lifeCancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		qs:    qs,
 		store: cfg.Store,
@@ -81,20 +90,43 @@ func New(cfg Cfg) (*Scheduler, error) {
 		newTrigger: func(expr string) (quartz.Trigger, error) {
 			return quartz.NewCronTriggerWithLoc(expr, loc)
 		},
-		stopChan: make(chan struct{}),
+		life:       life,
+		lifeCancel: lifeCancel,
+		stopChan:   make(chan struct{}),
 	}, nil
 }
 
-// Start begins firing and loads the stored schedules. It returns an error when
-// the store cannot be read: a scheduler silently running with no schedules is
-// worse than one that refuses to boot. Individual rows whose cron no longer
-// parses are skipped with a warning. Calling Start again is a no-op.
+// Start begins firing and loads the stored schedules.
+//
+// ctx bounds the initial read of the store only; it does not bound the
+// Scheduler's lifetime. Only ShutDown stops firing. That makes the usual wiring
+// pattern safe:
+//
+//	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+//	defer cancel()
+//	if err := sched.Start(ctx); err != nil { ... }
+//
+// The deferred cancel bounds the store read and nothing else — the Scheduler
+// keeps firing after Start returns.
+//
+// Start returns an error when the store cannot be read: a scheduler silently
+// running with no schedules is worse than one that refuses to boot. A failed
+// Start leaves the Scheduler stopped rather than half-up, so a retry genuinely
+// retries. Individual rows whose cron no longer parses are skipped with a
+// warning. Calling Start again after it has succeeded is a no-op.
 func (s *Scheduler) Start(ctx context.Context) error {
 	if !s.started.CompareAndSwap(false, true) {
 		return nil
 	}
-	s.qs.Start(ctx)
-	return s.Reload(ctx)
+	s.qs.Start(s.life)
+	if err := s.Reload(ctx); err != nil {
+		// Unwind: leaving quartz running with zero jobs and started=true would
+		// let every write method through and make a retried Start a silent no-op.
+		s.qs.Stop()
+		s.started.Store(false)
+		return err
+	}
+	return nil
 }
 
 // ShutDown stops firing and waits for in-flight fires to return. It returns
@@ -103,6 +135,7 @@ func (s *Scheduler) ShutDown(ctx context.Context) error {
 	var err error
 	s.stopOnce.Do(func() {
 		s.qs.Stop()
+		s.lifeCancel()
 		done := make(chan struct{})
 		go func() {
 			s.qs.Wait(context.Background())
@@ -245,15 +278,18 @@ func (s *Scheduler) infoLocked(sch Schedule) ScheduleInfo {
 		return info
 	}
 	if next := sj.NextRunTime(); next > 0 {
-		info.NextFireAt = time.Unix(0, next)
+		at := time.Unix(0, next)
+		info.NextFireAt = &at
 	}
 	return info
 }
 
 // Create persists a new schedule and registers it when enabled. The cron
-// expression is validated first, so an invalid one never reaches the store. An
-// empty ID is generated; a supplied one is honoured, which lets a restore keep
-// its ids. If registration fails after the save, the save is undone.
+// expression is validated first, so an invalid one never reaches the store, and
+// the normalized 6-field Quartz form is what gets stored — not the string
+// submitted, so a 5-field "0 2 * * *" comes back as "0 0 2 * * *". An empty ID
+// is generated; a supplied one is honoured, which lets a restore keep its ids.
+// If registration fails after the save, the save is undone.
 func (s *Scheduler) Create(ctx context.Context, sch Schedule) (ScheduleInfo, error) {
 	if err := s.requireStarted(); err != nil {
 		return ScheduleInfo{}, err
@@ -268,6 +304,10 @@ func (s *Scheduler) Create(ctx context.Context, sch Schedule) (ScheduleInfo, err
 		sch.ID = uuid.New()
 	}
 	sch.Cron = NormalizeCron(sch.Cron)
+	// Take our own copy of the params: the value below is both persisted and read
+	// by the quartz worker on every fire, so aliasing the caller's slice would
+	// race any later mutation of it.
+	sch.Params = slices.Clone(sch.Params)
 	now := time.Now()
 	sch.CreatedAt, sch.UpdatedAt = now, now
 
@@ -293,9 +333,10 @@ func (s *Scheduler) Create(ctx context.Context, sch Schedule) (ScheduleInfo, err
 	return s.infoLocked(sch), nil
 }
 
-// Update replaces the schedule identified by sch.ID and re-registers it.
-// CreatedAt is preserved. If registration fails after the save, the previous
-// record is restored.
+// Update replaces the schedule identified by sch.ID and re-registers it. Like
+// Create, it stores the normalized 6-field Quartz cron rather than the string
+// submitted. CreatedAt is preserved. If registration fails after the save, the
+// previous record is restored.
 func (s *Scheduler) Update(ctx context.Context, sch Schedule) (ScheduleInfo, error) {
 	if err := s.requireStarted(); err != nil {
 		return ScheduleInfo{}, err
@@ -317,6 +358,8 @@ func (s *Scheduler) Update(ctx context.Context, sch Schedule) (ScheduleInfo, err
 		return ScheduleInfo{}, err
 	}
 	sch.Cron = NormalizeCron(sch.Cron)
+	// Take our own copy, for the same reason as in Create.
+	sch.Params = slices.Clone(sch.Params)
 	sch.CreatedAt = prev.CreatedAt
 	sch.UpdatedAt = time.Now()
 	if err := s.store.Save(ctx, sch); err != nil {
@@ -386,6 +429,11 @@ func (s *Scheduler) Delete(ctx context.Context, id uuid.UUID) error {
 
 // Trigger enqueues the schedule's task immediately, with its stored params,
 // regardless of whether the schedule is enabled. It returns the new task id.
+//
+// Unlike the write methods, Trigger deliberately carries no started guard: it
+// touches only the store and the enqueuer, never the quartz scheduler, so it is
+// usable before Start and after ShutDown. "Run this now" is a valid request from
+// an admin UI whether or not the timetable itself is running.
 func (s *Scheduler) Trigger(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
 	sch, err := s.store.Get(ctx, id)
 	if err != nil {

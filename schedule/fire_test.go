@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/reugn/go-quartz/quartz"
 )
 
 // waitForCalls polls until the enqueuer has recorded at least n calls, or fails
@@ -140,6 +142,150 @@ func TestParamsAreNotSharedBetweenFires(t *testing.T) {
 	}
 }
 
+// TestStartsContextDoesNotStopTheScheduler pins the lifetime rule: go-quartz
+// stops firing as soon as the context it was started with is done, so Start must
+// not hand it the caller's ctx. Otherwise the everyday
+//
+//	ctx, cancel := context.WithTimeout(...); defer cancel(); sched.Start(ctx)
+//
+// wiring kills the scheduler on the way out of the wiring function, silently.
+func TestStartsContextDoesNotStopTheScheduler(t *testing.T) {
+	st := NewMemStore()
+	enq := &fakeEnqueuer{}
+	s, err := New(Cfg{Store: st, Enqueuer: enq, Logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.newTrigger = func(_ string) (quartz.Trigger, error) {
+		return quartz.NewSimpleTrigger(10 * time.Millisecond), nil
+	}
+
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	if err := s.Start(startCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.ShutDown(ctx)
+	})
+
+	ctx := context.Background()
+	if _, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	before := len(waitForCalls(t, enq, 1))
+
+	// The caller is done with its start context and drops it, as it should be
+	// free to. Firing must carry on: only ShutDown ends the Scheduler.
+	cancelStart()
+	waitForCalls(t, enq, before+2)
+
+	// And nothing has shut down, so Wait must still block.
+	done := make(chan struct{})
+	go func() { s.Wait(); close(done) }()
+	select {
+	case <-done:
+		t.Error("Wait returned although the Scheduler was never shut down")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestCreateTakesItsOwnCopyOfParams pins that Create does not alias the caller's
+// slice. Without the copy this is a data race against the quartz worker, and it
+// corrupts the fired params, the stored params and what Get reports.
+func TestCreateTakesItsOwnCopyOfParams(t *testing.T) {
+	ctx := context.Background()
+	s, st, enq := newTestSchedulerInterval(t, 10*time.Millisecond)
+
+	// The caller keeps ownership of its buffer and reuses it, as documented.
+	params := []byte(`{"full":true}`)
+	created, err := s.Create(ctx, Schedule{
+		TaskName: "scan",
+		Cron:     "0 2 * * *",
+		Params:   params,
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Keep writing to it while the schedule fires, so the race detector sees the
+	// overlap rather than depending on the timing of a single write.
+	stop := make(chan struct{})
+	mutated := make(chan struct{})
+	go func() {
+		defer close(mutated)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				copy(params, `{"full":9999}`)
+				time.Sleep(100 * time.Microsecond)
+			}
+		}
+	}()
+
+	calls := waitForCalls(t, enq, 2)
+	close(stop)
+	<-mutated
+
+	for i, c := range calls {
+		if string(c.params) != `{"full":true}` {
+			t.Errorf("fire %d saw the caller's mutation: %s", i, c.params)
+		}
+	}
+	if string(created.Params) != `{"full":true}` {
+		t.Errorf("the returned schedule saw the caller's mutation: %s", created.Params)
+	}
+	stored, err := st.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(stored.Params) != `{"full":true}` {
+		t.Errorf("the stored params saw the caller's mutation: %s", stored.Params)
+	}
+	got, err := s.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got.Params) != `{"full":true}` {
+		t.Errorf("Get returned mutated params: %s", got.Params)
+	}
+}
+
+// TestUpdateTakesItsOwnCopyOfParams is the Update half of the rule above.
+func TestUpdateTakesItsOwnCopyOfParams(t *testing.T) {
+	ctx := context.Background()
+	s, st, _ := newTestScheduler(t)
+
+	created, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	params := []byte(`{"full":true}`)
+	updated := created.Schedule
+	updated.Params = params
+	got, err := s.Update(ctx, updated)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	copy(params, `{"full":9999}`)
+
+	if string(got.Params) != `{"full":true}` {
+		t.Errorf("the returned schedule saw the caller's mutation: %s", got.Params)
+	}
+	stored, err := st.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(stored.Params) != `{"full":true}` {
+		t.Errorf("the stored params saw the caller's mutation: %s", stored.Params)
+	}
+}
+
 func TestNextFireAtAdvances(t *testing.T) {
 	ctx := context.Background()
 	s, _, _ := newTestSchedulerInterval(t, 50*time.Millisecond)
@@ -148,7 +294,7 @@ func TestNextFireAtAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if created.NextFireAt.IsZero() {
+	if created.NextFireAt == nil {
 		t.Fatal("expected a next fire time")
 	}
 
@@ -158,7 +304,7 @@ func TestNextFireAtAdvances(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.NextFireAt.After(created.NextFireAt) {
+		if got.NextFireAt != nil && got.NextFireAt.After(*created.NextFireAt) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

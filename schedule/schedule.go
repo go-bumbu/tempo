@@ -5,6 +5,16 @@
 // persist the change and reschedule the affected job in a single call, so a
 // caller cannot leave the store and the running scheduler out of step. Use
 // Reload when something else writes to the store (a backup restore, manual SQL).
+//
+// # One process per store
+//
+// A Scheduler assumes it is the only one running against its store. Two
+// processes sharing a single tempo_schedules table each run their own quartz
+// instance and both fire every enabled schedule, so a nightly job runs twice.
+// Create's existence check is likewise serialized only by this Scheduler's
+// in-process mutex, not by a database transaction, so two processes can race
+// past it. There is no leader election here: run exactly one scheduling process
+// per store, or partition the schedules into a store per process.
 package schedule
 
 import (
@@ -37,6 +47,10 @@ type Schedule struct {
 	// Params is the payload handed to the task, verbatim, on every fire. It is
 	// json.RawMessage rather than []byte so it embeds in JSON instead of
 	// base64-encoding itself.
+	//
+	// Create and Update take their own copy, and every fire hands the task a
+	// fresh one, so the caller keeps ownership of the slice it passes and may
+	// reuse or mutate it afterwards without affecting a stored schedule.
 	Params    json.RawMessage `json:"params,omitempty"`
 	Enabled   bool            `json:"enabled"`
 	CreatedAt time.Time       `json:"created_at"`
@@ -44,11 +58,17 @@ type Schedule struct {
 }
 
 // ScheduleInfo is a Schedule plus the one thing a caller cannot derive itself.
+//
+// An Enabled schedule with a nil NextFireAt is not running. That is the only
+// signal available for a row Reload warn-skipped because its cron no longer
+// parses: the store still says Enabled: true, since Reload does not write, while
+// List and Get report no next fire time because no job was registered. Treat the
+// combination as "broken cron" and re-save the schedule to clear it.
 type ScheduleInfo struct {
 	Schedule
-	// NextFireAt is read from the live trigger. It is zero when the schedule is
-	// disabled or not currently registered.
-	NextFireAt time.Time `json:"next_fire_at,omitempty"`
+	// NextFireAt is read from the live trigger. It is nil — and omitted from the
+	// JSON — when the schedule is disabled or not currently registered.
+	NextFireAt *time.Time `json:"next_fire_at,omitempty"`
 }
 
 // Enqueuer is how a fire reaches the task queue. *tempo.QueueRunner satisfies

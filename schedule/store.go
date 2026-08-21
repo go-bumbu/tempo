@@ -29,9 +29,21 @@ type Store interface {
 
 // MemStore is an in-memory Store, used when schedules need not survive a
 // restart and by tests. It is safe for concurrent use.
+//
+// It clones Schedule.Params on the way in and out, so a caller mutating the
+// params of a stored or returned Schedule cannot reach into the store. A store
+// that serializes — dbschedule — gets that for free; MemStore has to do it by
+// hand to stay interchangeable with one.
 type MemStore struct {
 	mu   sync.Mutex
 	data map[uuid.UUID]Schedule
+}
+
+// cloneSchedule copies the one field of a Schedule that is not copied by
+// assignment.
+func cloneSchedule(s Schedule) Schedule {
+	s.Params = slices.Clone(s.Params)
+	return s
 }
 
 // NewMemStore returns an empty in-memory store.
@@ -44,7 +56,7 @@ func (m *MemStore) List(_ context.Context) ([]Schedule, error) {
 	defer m.mu.Unlock()
 	out := make([]Schedule, 0, len(m.data))
 	for _, s := range m.data {
-		out = append(out, s)
+		out = append(out, cloneSchedule(s))
 	}
 	slices.SortFunc(out, func(a, b Schedule) int {
 		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
@@ -62,13 +74,13 @@ func (m *MemStore) Get(_ context.Context, id uuid.UUID) (Schedule, error) {
 	if !ok {
 		return Schedule{}, ErrScheduleNotFound
 	}
-	return s, nil
+	return cloneSchedule(s), nil
 }
 
 func (m *MemStore) Save(_ context.Context, s Schedule) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.data[s.ID] = s
+	m.data[s.ID] = cloneSchedule(s)
 	return nil
 }
 

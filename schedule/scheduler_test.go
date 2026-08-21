@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,7 +136,7 @@ func TestLocationIsHonoured(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got.NextFireAt.IsZero() {
+			if got.NextFireAt == nil {
 				t.Fatal("expected a next fire time")
 			}
 			if h := got.NextFireAt.UTC().Hour(); h != tc.wantHour {
@@ -174,7 +176,7 @@ func TestUnixSundayTranslationFiresOnSunday(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.NextFireAt.IsZero() {
+	if got.NextFireAt == nil {
 		t.Fatal("expected a next fire time")
 	}
 	if got.NextFireAt.UTC().Weekday() != time.Sunday {
@@ -253,6 +255,52 @@ func TestStart(t *testing.T) {
 	})
 }
 
+// TestStartFailureIsCleanAndRetryable pins what a failed Start leaves behind. A
+// scheduler left "started" with quartz running and zero jobs is the exact state
+// to avoid: every write method passes its guard, and a caller who retries Start
+// gets nil without anything being loaded.
+func TestStartFailureIsCleanAndRetryable(t *testing.T) {
+	ctx := context.Background()
+	wantErr := errors.New("db down")
+	st := &flakyStore{MemStore: NewMemStore(), listErr: wantErr}
+	sch := Schedule{ID: uuid.New(), TaskName: "scan", Cron: "0 0 2 * * *", Enabled: true, CreatedAt: time.Unix(1, 0)}
+	if err := st.Save(ctx, sch); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { _ = s.ShutDown(ctx) })
+
+	if err := s.Start(ctx); !errors.Is(err, wantErr) {
+		t.Fatalf("expected the store error, got %v", err)
+	}
+
+	// Every write must refuse, rather than run against a scheduler holding no jobs.
+	if _, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *"}); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Create: expected ErrNotStarted after a failed Start, got %v", err)
+	}
+	if _, err := s.Update(ctx, sch); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Update: expected ErrNotStarted after a failed Start, got %v", err)
+	}
+	if _, err := s.SetEnabled(ctx, sch.ID, false); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("SetEnabled: expected ErrNotStarted after a failed Start, got %v", err)
+	}
+	if err := s.Delete(ctx, sch.ID); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Delete: expected ErrNotStarted after a failed Start, got %v", err)
+	}
+
+	// And the retry is a real retry, not a no-op that reports nil.
+	st.heal()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("expected the retried Start to succeed, got %v", err)
+	}
+	if !hasJob(t, s, sch.ID) {
+		t.Error("expected the retried Start to load the stored schedule")
+	}
+}
+
 func TestReload(t *testing.T) {
 	ctx := context.Background()
 
@@ -304,7 +352,7 @@ func TestReadsReportNextFireAt(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	t.Run("list includes disabled schedules with a zero NextFireAt", func(t *testing.T) {
+	t.Run("list includes disabled schedules with a nil NextFireAt", func(t *testing.T) {
 		list, err := s.List(ctx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -315,11 +363,11 @@ func TestReadsReportNextFireAt(t *testing.T) {
 		if list[0].ID != on.ID || list[1].ID != off.ID {
 			t.Fatalf("expected store order to be preserved, got %v then %v", list[0].ID, list[1].ID)
 		}
-		if list[0].NextFireAt.IsZero() {
+		if list[0].NextFireAt == nil {
 			t.Error("expected the enabled schedule to report a next fire time")
 		}
-		if !list[1].NextFireAt.IsZero() {
-			t.Error("expected the disabled schedule to report a zero next fire time")
+		if list[1].NextFireAt != nil {
+			t.Error("expected the disabled schedule to report no next fire time")
 		}
 		if string(list[0].Params) != `{"full":true}` {
 			t.Errorf("expected params to survive the read, got %s", list[0].Params)
@@ -334,7 +382,7 @@ func TestReadsReportNextFireAt(t *testing.T) {
 		if got.ID != on.ID {
 			t.Errorf("expected schedule %v, got %v", on.ID, got.ID)
 		}
-		if got.NextFireAt.IsZero() {
+		if got.NextFireAt == nil {
 			t.Error("expected a next fire time")
 		}
 	})
@@ -344,6 +392,43 @@ func TestReadsReportNextFireAt(t *testing.T) {
 			t.Errorf("expected ErrScheduleNotFound, got %v", err)
 		}
 	})
+}
+
+// TestScheduleInfoJSONOmitsAnAbsentNextFireAt pins that the omitempty tag on
+// NextFireAt is real. As a time.Time it was a no-op — a disabled schedule
+// marshalled as "next_fire_at":"0001-01-01T00:00:00Z", which a frontend renders
+// as a bogus year-1 date.
+func TestScheduleInfoJSONOmitsAnAbsentNextFireAt(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestScheduler(t)
+
+	on, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	off, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 3 * * *", Enabled: false})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	enabledJSON, err := json.Marshal(on)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(string(enabledJSON), `"next_fire_at":`) {
+		t.Errorf("expected an enabled schedule to carry next_fire_at: %s", enabledJSON)
+	}
+
+	disabledJSON, err := json.Marshal(off)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(string(disabledJSON), "next_fire_at") {
+		t.Errorf("expected next_fire_at to be omitted for a disabled schedule: %s", disabledJSON)
+	}
+	if strings.Contains(string(disabledJSON), "0001-01-01") {
+		t.Errorf("expected no year-1 date in the JSON: %s", disabledJSON)
+	}
 }
 
 func TestShutDown(t *testing.T) {
@@ -402,6 +487,30 @@ func (f *failingStore) Delete(context.Context, uuid.UUID) error {
 	return ErrScheduleNotFound
 }
 
+// flakyStore is a MemStore whose List fails until heal is called, so a test can
+// watch a failed Start be retried against a store that has come back.
+type flakyStore struct {
+	*MemStore
+	mu      sync.Mutex
+	listErr error
+}
+
+func (f *flakyStore) List(ctx context.Context) ([]Schedule, error) {
+	f.mu.Lock()
+	err := f.listErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return f.MemStore.List(ctx)
+}
+
+func (f *flakyStore) heal() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listErr = nil
+}
+
 // storeWithFailingDelete wraps a MemStore but makes Delete fail with a custom error.
 type storeWithFailingDelete struct {
 	*MemStore
@@ -435,7 +544,7 @@ func TestCreate(t *testing.T) {
 		if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
 			t.Error("expected timestamps to be set")
 		}
-		if got.NextFireAt.IsZero() {
+		if got.NextFireAt == nil {
 			t.Error("expected a next fire time for an enabled schedule")
 		}
 		if !hasJob(t, s, got.ID) {
@@ -471,8 +580,8 @@ func TestCreate(t *testing.T) {
 		if hasJob(t, s, got.ID) {
 			t.Error("expected no job for a disabled schedule")
 		}
-		if !got.NextFireAt.IsZero() {
-			t.Error("expected a zero next fire time")
+		if got.NextFireAt != nil {
+			t.Error("expected no next fire time")
 		}
 		if _, err := st.Get(ctx, got.ID); err != nil {
 			t.Errorf("expected the schedule to be persisted: %v", err)

@@ -102,15 +102,66 @@ func TestMemStore(t *testing.T) {
 		}
 	})
 
+}
+
+// TestMemStoreDoesNotAliasParams guards every door of the store. Params is the
+// only field of a Schedule that assignment does not copy, so it is the only one
+// that can alias — dbschedule is immune because serialization breaks the alias,
+// and MemStore has to clone by hand to stay interchangeable with it.
+func TestMemStoreDoesNotAliasParams(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("list returns copies, not aliases", func(t *testing.T) {
 		st := NewMemStore()
 		id := uuid.New()
-		_ = st.Save(ctx, Schedule{ID: id, TaskName: "scan", Cron: "0 * * * * *"})
+		_ = st.Save(ctx, Schedule{ID: id, TaskName: "scan", Cron: "0 * * * * *", Params: json.RawMessage(`{"full":true}`)})
 		list, _ := st.List(ctx)
 		list[0].Cron = "mutated"
+		list[0].Params[2] = 'X'
 		got, _ := st.Get(ctx, id)
 		if got.Cron != "0 * * * * *" {
 			t.Errorf("mutating a listed schedule changed the store: %q", got.Cron)
+		}
+		if string(got.Params) != `{"full":true}` {
+			t.Errorf("mutating a listed schedule's params changed the store: %s", got.Params)
+		}
+	})
+
+	t.Run("get returns copies, not aliases", func(t *testing.T) {
+		st := NewMemStore()
+		id := uuid.New()
+		_ = st.Save(ctx, Schedule{ID: id, TaskName: "scan", Cron: "0 * * * * *", Params: json.RawMessage(`{"full":true}`)})
+		got, _ := st.Get(ctx, id)
+		got.Params[2] = 'X'
+		again, _ := st.Get(ctx, id)
+		if string(again.Params) != `{"full":true}` {
+			t.Errorf("mutating a fetched schedule's params changed the store: %s", again.Params)
+		}
+	})
+
+	t.Run("save does not alias the caller's params", func(t *testing.T) {
+		st := NewMemStore()
+		id := uuid.New()
+		params := json.RawMessage(`{"full":true}`)
+		_ = st.Save(ctx, Schedule{ID: id, TaskName: "scan", Cron: "0 * * * * *", Params: params})
+		params[2] = 'X'
+		got, _ := st.Get(ctx, id)
+		if string(got.Params) != `{"full":true}` {
+			t.Errorf("mutating the saved slice changed the store: %s", got.Params)
+		}
+	})
+
+	t.Run("nil params stay nil", func(t *testing.T) {
+		st := NewMemStore()
+		id := uuid.New()
+		_ = st.Save(ctx, Schedule{ID: id, TaskName: "scan", Cron: "0 * * * * *"})
+		got, _ := st.Get(ctx, id)
+		if got.Params != nil {
+			t.Errorf("expected nil params, got %s", got.Params)
+		}
+		list, _ := st.List(ctx)
+		if list[0].Params != nil {
+			t.Errorf("expected nil params from List, got %s", list[0].Params)
 		}
 	})
 }

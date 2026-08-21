@@ -88,7 +88,7 @@ func Example() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("nightly enabled=%v nextFireAt set=%v\n", off.Enabled, !off.NextFireAt.IsZero())
+	fmt.Printf("nightly enabled=%v nextFireAt set=%v\n", off.Enabled, off.NextFireAt != nil)
 
 	if err := sched.ShutDown(ctx); err != nil {
 		panic(err)
