@@ -119,10 +119,8 @@ func (r *QueueRunner) StartBg() {
 				if err != nil {
 					return
 				}
-
-				r.runMu.Lock()
-				r.runningCount[name]++
-				r.runMu.Unlock()
+				// runningCount was already incremented by canClaim, atomically
+				// with the claim (see buildCanClaim); do not bump it again here.
 
 				entry, ok := r.registry.lookup(name)
 				if !ok {
@@ -185,19 +183,22 @@ func (r *QueueRunner) appendTaskLog(ctx context.Context, id uuid.UUID, level str
 	}
 }
 
+// buildCanClaim returns the claim gate NextTask calls (while holding the queue
+// lock) to decide whether a waiting task may run. It reserves the slot as part
+// of the check: when it allows the task it increments runningCount before
+// returning, so two workers can never both pass a per-task limit before either
+// records its claim. The reservation is released by decrRunningCount once the
+// task finishes (or by the caller when the registry lookup fails).
 func (r *QueueRunner) buildCanClaim() func(name string) bool {
 	return func(name string) bool {
 		entry, ok := r.registry.lookup(name)
-		if !ok {
-			return true
-		}
-		if entry.maxParallelism == 0 {
-			return true
-		}
 		r.runMu.Lock()
-		n := r.runningCount[name]
-		r.runMu.Unlock()
-		return n < entry.maxParallelism
+		defer r.runMu.Unlock()
+		if ok && entry.maxParallelism > 0 && r.runningCount[name] >= entry.maxParallelism {
+			return false
+		}
+		r.runningCount[name]++
+		return true
 	}
 }
 

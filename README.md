@@ -66,6 +66,61 @@ tempo.RunnerCfg{
 }
 ```
 
+## Scheduling
+
+`tempo/schedule` runs tasks on a cron timetable. Schedules are persisted and can
+be edited while the process runs; the scheduler owns the write path, so a change
+is stored and rescheduled in one call.
+
+```go
+sched, err := schedule.New(schedule.Cfg{
+    Store:    schedule.NewMemStore(), // or dbschedule.New(db)
+    Enqueuer: runner,                 // *tempo.QueueRunner satisfies this directly
+})
+if err != nil {
+    panic(err)
+}
+if err := sched.Start(ctx); err != nil {
+    panic(err)
+}
+
+// One task, two cadences, different parameters.
+nightly, err := sched.Create(ctx, schedule.Schedule{
+    TaskName: "scan",
+    Cron:     "0 2 * * *", // 5-field Unix or 6-field Quartz cron
+    Params:   []byte(`{"full":false}`),
+    Enabled:  true,
+})
+```
+
+Editing at runtime — each call persists **and** reschedules:
+
+```go
+sched.Update(ctx, updated)              // new cron or params
+sched.SetEnabled(ctx, nightly.ID, false) // pause without deleting
+sched.Delete(ctx, nightly.ID)
+sched.Trigger(ctx, nightly.ID)           // run now, with the stored params
+sched.Reload(ctx)                        // re-sync after a restore wrote to the store
+```
+
+Validate user input before storing it:
+
+```go
+if err := schedule.ValidateCron(userInput); err != nil {
+    // reject the request
+}
+```
+
+Schedules persist across restarts with `dbschedule`:
+
+```go
+store, err := dbschedule.New(db) // AutoMigrates the tempo_schedules table
+```
+
+A fire that cannot be enqueued — a full queue, an unregistered task name — is
+logged and dropped. Fires missed while the process was down are not replayed,
+and a fire is enqueued even if the previous run is still going; use
+`tempo.WithMaxParallelism(1)` to stop a task running concurrently with itself.
 
 ## How To
 
