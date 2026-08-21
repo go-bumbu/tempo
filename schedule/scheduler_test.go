@@ -363,3 +363,379 @@ func (f *failingStore) Save(context.Context, Schedule) error {
 func (f *failingStore) Delete(context.Context, uuid.UUID) error {
 	return ErrScheduleNotFound
 }
+
+//nolint:gocyclo // Test suite with multiple subtests and assertions
+func TestCreate(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("persists and registers in one call", func(t *testing.T) {
+		s, st, _ := newTestScheduler(t)
+		got, err := s.Create(ctx, Schedule{
+			TaskName: "scan",
+			Cron:     "0 2 * * *",
+			Params:   json.RawMessage(`{"full":true}`),
+			Enabled:  true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.ID == uuid.Nil {
+			t.Error("expected an id to be generated")
+		}
+		if got.Cron != "0 0 2 * * *" {
+			t.Errorf("expected the cron to be normalized, got %q", got.Cron)
+		}
+		if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+			t.Error("expected timestamps to be set")
+		}
+		if got.NextFireAt.IsZero() {
+			t.Error("expected a next fire time for an enabled schedule")
+		}
+		if !hasJob(t, s, got.ID) {
+			t.Error("expected the job to be registered")
+		}
+		stored, err := st.Get(ctx, got.ID)
+		if err != nil {
+			t.Fatalf("expected the schedule to be persisted: %v", err)
+		}
+		if string(stored.Params) != `{"full":true}` {
+			t.Errorf("expected params to be persisted, got %s", stored.Params)
+		}
+	})
+
+	t.Run("honours a caller-supplied id so a restore can keep it", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		id := uuid.New()
+		got, err := s.Create(ctx, Schedule{ID: id, TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.ID != id {
+			t.Errorf("expected id %v, got %v", id, got.ID)
+		}
+	})
+
+	t.Run("a disabled schedule is persisted but not registered", func(t *testing.T) {
+		s, st, _ := newTestScheduler(t)
+		got, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: false})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if hasJob(t, s, got.ID) {
+			t.Error("expected no job for a disabled schedule")
+		}
+		if !got.NextFireAt.IsZero() {
+			t.Error("expected a zero next fire time")
+		}
+		if _, err := st.Get(ctx, got.ID); err != nil {
+			t.Errorf("expected the schedule to be persisted: %v", err)
+		}
+	})
+
+	t.Run("rejects an invalid cron before touching the store", func(t *testing.T) {
+		s, st, _ := newTestScheduler(t)
+		if _, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "not a cron", Enabled: true}); err == nil {
+			t.Fatal("expected an error for an invalid cron")
+		}
+		list, _ := st.List(ctx)
+		if len(list) != 0 {
+			t.Errorf("expected nothing to be persisted, got %d schedules", len(list))
+		}
+	})
+
+	t.Run("rejects a missing task name", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		if _, err := s.Create(ctx, Schedule{Cron: "0 2 * * *", Enabled: true}); err == nil {
+			t.Error("expected an error for an empty task name")
+		}
+	})
+
+	t.Run("undoes the save when registration fails", func(t *testing.T) {
+		st := NewMemStore()
+		s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		t.Cleanup(func() { _ = s.ShutDown(ctx) })
+		// A trigger builder that fails makes registration fail after the save.
+		s.newTrigger = func(_ string) (quartz.Trigger, error) {
+			return nil, errors.New("trigger boom")
+		}
+
+		if _, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true}); err == nil {
+			t.Fatal("expected the create to fail")
+		}
+		list, _ := st.List(ctx)
+		if len(list) != 0 {
+			t.Errorf("expected the save to be undone, got %d schedules", len(list))
+		}
+	})
+
+}
+
+func TestWritesBeforeStartAreRejected(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(Cfg{Store: NewMemStore(), Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *"}); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Create: expected ErrNotStarted, got %v", err)
+	}
+	if _, err := s.Update(ctx, Schedule{ID: uuid.New(), TaskName: "scan", Cron: "0 2 * * *"}); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Update: expected ErrNotStarted, got %v", err)
+	}
+	if _, err := s.SetEnabled(ctx, uuid.New(), true); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("SetEnabled: expected ErrNotStarted, got %v", err)
+	}
+	if err := s.Delete(ctx, uuid.New()); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Delete: expected ErrNotStarted, got %v", err)
+	}
+}
+
+func TestUpdate(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("replaces cron and params and re-registers", func(t *testing.T) {
+		s, st, _ := newTestScheduler(t)
+		created, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Params: json.RawMessage(`{"full":false}`), Enabled: true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		updated := created.Schedule
+		updated.Cron = "0 5 * * *"
+		updated.Params = json.RawMessage(`{"full":true}`)
+		got, err := s.Update(ctx, updated)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Cron != "0 0 5 * * *" {
+			t.Errorf("expected the new normalized cron, got %q", got.Cron)
+		}
+		if !got.CreatedAt.Equal(created.CreatedAt) {
+			t.Error("expected CreatedAt to be preserved")
+		}
+		if got.UpdatedAt.Before(created.UpdatedAt) {
+			t.Error("expected UpdatedAt not to move backwards")
+		}
+		if !hasJob(t, s, created.ID) {
+			t.Error("expected the job to still be registered")
+		}
+		if len(jobKeys(t, s)) != 1 {
+			t.Errorf("expected exactly 1 job after an update, got %v", jobKeys(t, s))
+		}
+		stored, _ := st.Get(ctx, created.ID)
+		if string(stored.Params) != `{"full":true}` {
+			t.Errorf("expected the new params to be persisted, got %s", stored.Params)
+		}
+	})
+
+	t.Run("disabling deregisters the job", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		updated := created.Schedule
+		updated.Enabled = false
+		if _, err := s.Update(ctx, updated); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if hasJob(t, s, created.ID) {
+			t.Error("expected the job to be deregistered")
+		}
+	})
+
+	t.Run("reports a missing schedule", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		_, err := s.Update(ctx, Schedule{ID: uuid.New(), TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		if !errors.Is(err, ErrScheduleNotFound) {
+			t.Errorf("expected ErrScheduleNotFound, got %v", err)
+		}
+		_, err = s.Update(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		if !errors.Is(err, ErrScheduleNotFound) {
+			t.Errorf("expected ErrScheduleNotFound for a nil id, got %v", err)
+		}
+	})
+
+	t.Run("rejects an invalid cron and leaves the stored schedule alone", func(t *testing.T) {
+		s, st, _ := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		updated := created.Schedule
+		updated.Cron = "not a cron"
+		if _, err := s.Update(ctx, updated); err == nil {
+			t.Fatal("expected an error for an invalid cron")
+		}
+		stored, _ := st.Get(ctx, created.ID)
+		if stored.Cron != "0 0 2 * * *" {
+			t.Errorf("expected the stored cron to be untouched, got %q", stored.Cron)
+		}
+	})
+
+	t.Run("restores the previous record when registration fails", func(t *testing.T) {
+		st := NewMemStore()
+		s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		t.Cleanup(func() { _ = s.ShutDown(ctx) })
+		s.newTrigger = func(_ string) (quartz.Trigger, error) { return quartz.NewSimpleTrigger(time.Hour), nil }
+
+		created, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		s.newTrigger = func(_ string) (quartz.Trigger, error) { return nil, errors.New("trigger boom") }
+		updated := created.Schedule
+		updated.Cron = "0 5 * * *"
+		if _, err := s.Update(ctx, updated); err == nil {
+			t.Fatal("expected the update to fail")
+		}
+		stored, _ := st.Get(ctx, created.ID)
+		if stored.Cron != "0 0 2 * * *" {
+			t.Errorf("expected the previous cron to be restored, got %q", stored.Cron)
+		}
+	})
+}
+
+func TestSetEnabled(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("toggles registration both ways", func(t *testing.T) {
+		s, st, _ := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+
+		off, err := s.SetEnabled(ctx, created.ID, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if off.Enabled {
+			t.Error("expected Enabled=false")
+		}
+		if hasJob(t, s, created.ID) {
+			t.Error("expected the job to be deregistered")
+		}
+		stored, _ := st.Get(ctx, created.ID)
+		if stored.Enabled {
+			t.Error("expected Enabled=false to be persisted")
+		}
+
+		on, err := s.SetEnabled(ctx, created.ID, true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !on.Enabled {
+			t.Error("expected Enabled=true")
+		}
+		if !hasJob(t, s, created.ID) {
+			t.Error("expected the job to be registered again")
+		}
+	})
+
+	t.Run("setting the current value is a no-op", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		got, err := s.SetEnabled(ctx, created.ID, true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !got.UpdatedAt.Equal(created.UpdatedAt) {
+			t.Error("expected UpdatedAt not to change on a no-op")
+		}
+		if len(jobKeys(t, s)) != 1 {
+			t.Errorf("expected exactly 1 job, got %v", jobKeys(t, s))
+		}
+	})
+
+	t.Run("reports a missing schedule", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		if _, err := s.SetEnabled(ctx, uuid.New(), true); !errors.Is(err, ErrScheduleNotFound) {
+			t.Errorf("expected ErrScheduleNotFound, got %v", err)
+		}
+	})
+}
+
+func TestDelete(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("removes the schedule and its job", func(t *testing.T) {
+		s, st, _ := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		if err := s.Delete(ctx, created.ID); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if hasJob(t, s, created.ID) {
+			t.Error("expected the job to be deregistered")
+		}
+		if _, err := st.Get(ctx, created.ID); !errors.Is(err, ErrScheduleNotFound) {
+			t.Errorf("expected the schedule to be gone, got %v", err)
+		}
+	})
+
+	t.Run("deleting a disabled schedule works", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: false})
+		if err := s.Delete(ctx, created.ID); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("reports a missing schedule", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		if err := s.Delete(ctx, uuid.New()); !errors.Is(err, ErrScheduleNotFound) {
+			t.Errorf("expected ErrScheduleNotFound, got %v", err)
+		}
+	})
+}
+
+func TestTrigger(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("enqueues the task with the stored params", func(t *testing.T) {
+		s, _, enq := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{
+			TaskName: "scan",
+			Cron:     "0 2 * * *",
+			Params:   json.RawMessage(`{"full":true}`),
+			Enabled:  true,
+		})
+		taskID, err := s.Trigger(ctx, created.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if taskID == uuid.Nil {
+			t.Error("expected a task id")
+		}
+		calls := enq.snapshot()
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 enqueue, got %d", len(calls))
+		}
+		if calls[0].name != "scan" || string(calls[0].params) != `{"full":true}` {
+			t.Errorf("unexpected enqueue: %+v", calls[0])
+		}
+	})
+
+	t.Run("works for a disabled schedule", func(t *testing.T) {
+		s, _, enq := newTestScheduler(t)
+		created, _ := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: false})
+		if _, err := s.Trigger(ctx, created.ID); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(enq.snapshot()) != 1 {
+			t.Error("expected the task to be enqueued even though the schedule is disabled")
+		}
+	})
+
+	t.Run("reports a missing schedule", func(t *testing.T) {
+		s, _, _ := newTestScheduler(t)
+		if _, err := s.Trigger(ctx, uuid.New()); !errors.Is(err, ErrScheduleNotFound) {
+			t.Errorf("expected ErrScheduleNotFound, got %v", err)
+		}
+	})
+}

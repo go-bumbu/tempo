@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -212,12 +213,20 @@ func (s *Scheduler) scheduleLocked(sch Schedule) error {
 	return nil
 }
 
+// deleteJobLocked deregisters a job, treating "not there" as success. Caller
+// must hold mu.
+func (s *Scheduler) deleteJobLocked(id uuid.UUID) error {
+	if err := s.qs.DeleteJob(jobKey(id)); err != nil && !errors.Is(err, quartz.ErrJobNotFound) {
+		return fmt.Errorf("schedule: deregister job %s: %w", id, err)
+	}
+	return nil
+}
+
 // applyLocked makes the running jobs match sch: deregistered when disabled,
 // freshly registered when enabled. Caller must hold mu.
 func (s *Scheduler) applyLocked(sch Schedule) error {
-	// Deregister any existing job, treating "not there" as success.
-	if err := s.qs.DeleteJob(jobKey(sch.ID)); err != nil && !errors.Is(err, quartz.ErrJobNotFound) {
-		return fmt.Errorf("schedule: deregister job %s: %w", sch.ID, err)
+	if err := s.deleteJobLocked(sch.ID); err != nil {
+		return err
 	}
 	if !sch.Enabled {
 		return nil
@@ -239,4 +248,164 @@ func (s *Scheduler) infoLocked(sch Schedule) ScheduleInfo {
 		info.NextFireAt = time.Unix(0, next)
 	}
 	return info
+}
+
+// Create persists a new schedule and registers it when enabled. The cron
+// expression is validated first, so an invalid one never reaches the store. An
+// empty ID is generated; a supplied one is honoured, which lets a restore keep
+// its ids. If registration fails after the save, the save is undone.
+func (s *Scheduler) Create(ctx context.Context, sch Schedule) (ScheduleInfo, error) {
+	if err := s.requireStarted(); err != nil {
+		return ScheduleInfo{}, err
+	}
+	if sch.TaskName == "" {
+		return ScheduleInfo{}, errors.New("schedule: task name is required")
+	}
+	if err := ValidateCron(sch.Cron); err != nil {
+		return ScheduleInfo{}, err
+	}
+	if sch.ID == uuid.Nil {
+		sch.ID = uuid.New()
+	}
+	sch.Cron = NormalizeCron(sch.Cron)
+	now := time.Now()
+	sch.CreatedAt, sch.UpdatedAt = now, now
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.store.Save(ctx, sch); err != nil {
+		return ScheduleInfo{}, fmt.Errorf("schedule: save %s: %w", sch.ID, err)
+	}
+	if err := s.applyLocked(sch); err != nil {
+		if delErr := s.store.Delete(ctx, sch.ID); delErr != nil {
+			s.log.Error("could not undo a failed create",
+				slog.String("component", "tempo/schedule"),
+				slog.String("scheduleId", sch.ID.String()),
+				slog.String("error", delErr.Error()))
+		}
+		return ScheduleInfo{}, err
+	}
+	return s.infoLocked(sch), nil
+}
+
+// Update replaces the schedule identified by sch.ID and re-registers it.
+// CreatedAt is preserved. If registration fails after the save, the previous
+// record is restored.
+func (s *Scheduler) Update(ctx context.Context, sch Schedule) (ScheduleInfo, error) {
+	if err := s.requireStarted(); err != nil {
+		return ScheduleInfo{}, err
+	}
+	if sch.ID == uuid.Nil {
+		return ScheduleInfo{}, ErrScheduleNotFound
+	}
+	if sch.TaskName == "" {
+		return ScheduleInfo{}, errors.New("schedule: task name is required")
+	}
+	if err := ValidateCron(sch.Cron); err != nil {
+		return ScheduleInfo{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, err := s.store.Get(ctx, sch.ID)
+	if err != nil {
+		return ScheduleInfo{}, err
+	}
+	sch.Cron = NormalizeCron(sch.Cron)
+	sch.CreatedAt = prev.CreatedAt
+	sch.UpdatedAt = time.Now()
+	if err := s.store.Save(ctx, sch); err != nil {
+		return ScheduleInfo{}, fmt.Errorf("schedule: save %s: %w", sch.ID, err)
+	}
+	if err := s.applyLocked(sch); err != nil {
+		s.rollbackLocked(ctx, prev)
+		return ScheduleInfo{}, err
+	}
+	return s.infoLocked(sch), nil
+}
+
+// SetEnabled turns a schedule on or off, registering or deregistering its job.
+// Setting the value it already has changes nothing.
+func (s *Scheduler) SetEnabled(ctx context.Context, id uuid.UUID, on bool) (ScheduleInfo, error) {
+	if err := s.requireStarted(); err != nil {
+		return ScheduleInfo{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, err := s.store.Get(ctx, id)
+	if err != nil {
+		return ScheduleInfo{}, err
+	}
+	if prev.Enabled == on {
+		return s.infoLocked(prev), nil
+	}
+	sch := prev
+	sch.Enabled = on
+	sch.UpdatedAt = time.Now()
+	if err := s.store.Save(ctx, sch); err != nil {
+		return ScheduleInfo{}, fmt.Errorf("schedule: save %s: %w", id, err)
+	}
+	if err := s.applyLocked(sch); err != nil {
+		s.rollbackLocked(ctx, prev)
+		return ScheduleInfo{}, err
+	}
+	return s.infoLocked(sch), nil
+}
+
+// Delete removes a schedule and deregisters its job.
+func (s *Scheduler) Delete(ctx context.Context, id uuid.UUID) error {
+	if err := s.requireStarted(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, err := s.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := s.deleteJobLocked(id); err != nil {
+		return err
+	}
+	if err := s.store.Delete(ctx, id); err != nil {
+		// Put the job back, so the store and the running jobs stay in step.
+		if applyErr := s.applyLocked(prev); applyErr != nil {
+			s.log.Error("could not restore the job after a failed delete",
+				slog.String("component", "tempo/schedule"),
+				slog.String("scheduleId", id.String()),
+				slog.String("error", applyErr.Error()))
+		}
+		return fmt.Errorf("schedule: delete %s: %w", id, err)
+	}
+	return nil
+}
+
+// Trigger enqueues the schedule's task immediately, with its stored params,
+// regardless of whether the schedule is enabled. It returns the new task id.
+func (s *Scheduler) Trigger(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	sch, err := s.store.Get(ctx, id)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	taskID, err := s.enq.AddRaw(sch.TaskName, slices.Clone([]byte(sch.Params)))
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("schedule: enqueue task %q: %w", sch.TaskName, err)
+	}
+	return taskID, nil
+}
+
+// rollbackLocked restores prev after a failed write, keeping the store and the
+// running jobs in step. Caller must hold mu.
+func (s *Scheduler) rollbackLocked(ctx context.Context, prev Schedule) {
+	if err := s.store.Save(ctx, prev); err != nil {
+		s.log.Error("could not undo a failed write",
+			slog.String("component", "tempo/schedule"),
+			slog.String("scheduleId", prev.ID.String()),
+			slog.String("error", err.Error()))
+	}
+	if err := s.applyLocked(prev); err != nil {
+		s.log.Error("could not restore the previous job",
+			slog.String("component", "tempo/schedule"),
+			slog.String("scheduleId", prev.ID.String()),
+			slog.String("error", err.Error()))
+	}
 }
