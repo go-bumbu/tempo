@@ -3,6 +3,7 @@ package schedule
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/reugn/go-quartz/quartz"
@@ -11,14 +12,71 @@ import (
 // NormalizeCron converts a 5-field Unix cron expression
 // (minute hour day-of-month month day-of-week) into the 6-field Quartz form
 // (second minute hour day-of-month month day-of-week) by prepending a zero
-// seconds field. Expressions that already carry 6 or more fields are returned
-// trimmed but otherwise unchanged. go-quartz requires the Quartz form.
+// seconds field and translating the day-of-week field. Unix uses 0=Sunday…6=Saturday
+// (7 also Sunday), while Quartz uses 1=Sunday…7=Saturday. Expressions that already
+// carry 6 or more fields are returned trimmed but otherwise unchanged.
+// go-quartz requires the Quartz form.
 func NormalizeCron(expr string) string {
 	expr = strings.TrimSpace(expr)
-	if len(strings.Fields(expr)) == 5 {
-		return "0 " + expr
+	fields := strings.Fields(expr)
+	if len(fields) == 5 {
+		fields[4] = translateDayOfWeek(fields[4])
+		return "0 " + strings.Join(fields, " ")
 	}
 	return expr
+}
+
+// translateDayOfWeek converts Unix day-of-week values (0-7) to Quartz (1-7).
+// Handles single values, lists, ranges, steps, wildcards, and named days.
+func translateDayOfWeek(field string) string {
+	if field == "*" || field == "?" {
+		return field
+	}
+	if strings.HasPrefix(field, "*/") || strings.HasPrefix(field, "?/") {
+		return field
+	}
+	if containsLetter(field) {
+		return field
+	}
+
+	var stepSuffix string
+	base := field
+	if idx := strings.Index(field, "/"); idx != -1 {
+		base = field[:idx]
+		stepSuffix = field[idx:]
+	}
+
+	parts := strings.Split(base, ",")
+	for i, part := range parts {
+		parts[i] = translateDayPart(part)
+	}
+	return strings.Join(parts, ",") + stepSuffix
+}
+
+func translateDayPart(part string) string {
+	if idx := strings.Index(part, "-"); idx != -1 {
+		start := part[:idx]
+		end := part[idx+1:]
+		return translateDayNumber(start) + "-" + translateDayNumber(end)
+	}
+	return translateDayNumber(part)
+}
+
+func translateDayNumber(s string) string {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return s
+	}
+	return strconv.Itoa((n%7) + 1)
+}
+
+func containsLetter(s string) bool {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateCron reports whether expr is a cron expression the Scheduler can use.

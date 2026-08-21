@@ -144,6 +144,44 @@ func TestLocationIsHonoured(t *testing.T) {
 	}
 }
 
+// TestUnixSundayTranslationFiresOnSunday proves that the Unix form "0 3 * * 0"
+// (Sunday in Unix cron) translates to Quartz and fires on Sunday, not Saturday.
+func TestUnixSundayTranslationFiresOnSunday(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemStore()
+	s, err := New(Cfg{
+		Store:    st,
+		Enqueuer: &fakeEnqueuer{},
+		Logger:   quietLogger(),
+		Location: time.UTC,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { _ = s.ShutDown(ctx) })
+
+	sch := Schedule{ID: uuid.New(), TaskName: "scan", Cron: "0 3 * * 0", Enabled: true, CreatedAt: time.Unix(1, 0)}
+	if err := st.Save(ctx, sch); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := s.Reload(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, err := s.Get(ctx, sch.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.NextFireAt.IsZero() {
+		t.Fatal("expected a next fire time")
+	}
+	if got.NextFireAt.UTC().Weekday() != time.Sunday {
+		t.Errorf("expected next fire on Sunday, got %v", got.NextFireAt.UTC().Weekday())
+	}
+}
+
 func TestStart(t *testing.T) {
 	ctx := context.Background()
 

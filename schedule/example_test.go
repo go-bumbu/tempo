@@ -48,7 +48,7 @@ func Example() {
 	// A quick nightly scan and a full weekly one: one task, two cadences.
 	nightly, err := sched.Create(ctx, schedule.Schedule{
 		TaskName: "scan",
-		Cron:     "0 2 * * *", // 5-field Unix cron is accepted
+		Cron:     "0 2 * * *", // 5-field Unix cron
 		Params:   []byte(`{"full":false}`),
 		Enabled:  true,
 	})
@@ -57,7 +57,7 @@ func Example() {
 	}
 	weekly, err := sched.Create(ctx, schedule.Schedule{
 		TaskName: "scan",
-		Cron:     "0 0 3 * * 1", // 6-field Quartz cron works too
+		Cron:     "0 3 * * 0", // Unix Sunday (0) translates to Quartz Sunday (1)
 		Params:   []byte(`{"full":true}`),
 		Enabled:  true,
 	})

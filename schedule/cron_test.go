@@ -12,10 +12,39 @@ func TestNormalizeCron(t *testing.T) {
 		want string
 	}{
 		{name: "5-field unix cron gains a seconds field", in: "0 2 * * *", want: "0 0 2 * * *"},
-		{name: "surrounding whitespace is trimmed", in: "  30 4 * * 1  ", want: "0 30 4 * * 1"},
+		{name: "surrounding whitespace is trimmed", in: "  30 4 * * 1  ", want: "0 30 4 * * 2"},
 		{name: "6-field quartz cron is unchanged", in: "0 0 2 * * *", want: "0 0 2 * * *"},
+		{name: "6-field with numeric day unchanged", in: "0 0 3 * * 1", want: "0 0 3 * * 1"},
 		{name: "7-field cron with year is unchanged", in: "0 0 2 * * * 2026", want: "0 0 2 * * * 2026"},
 		{name: "empty stays empty", in: "", want: ""},
+
+		// Day-of-week translation from Unix (0-7) to Quartz (1-7)
+		{name: "unix sunday 0 becomes quartz 1", in: "0 3 * * 0", want: "0 0 3 * * 1"},
+		{name: "unix monday 1 becomes quartz 2", in: "0 3 * * 1", want: "0 0 3 * * 2"},
+		{name: "unix saturday 6 becomes quartz 7", in: "0 3 * * 6", want: "0 0 3 * * 7"},
+		{name: "unix sunday 7 becomes quartz 1", in: "0 3 * * 7", want: "0 0 3 * * 1"},
+
+		// Lists
+		{name: "day list is translated", in: "0 3 * * 1,3,5", want: "0 0 3 * * 2,4,6"},
+		{name: "list with sunday 0", in: "0 3 * * 0,2,4", want: "0 0 3 * * 1,3,5"},
+
+		// Ranges
+		{name: "weekday range mon-fri", in: "0 3 * * 1-5", want: "0 0 3 * * 2-6"},
+		{name: "range starting at sunday 0", in: "0 3 * * 0-3", want: "0 0 3 * * 1-4"},
+
+		// Steps on ranges
+		{name: "step on weekday range", in: "0 3 * * 1-5/2", want: "0 0 3 * * 2-6/2"},
+
+		// Wildcards and steps on wildcards
+		{name: "wildcard unchanged", in: "*/15 * * * *", want: "0 */15 * * * *"},
+		{name: "step on wildcard day unchanged", in: "0 3 * * */2", want: "0 0 3 * * */2"},
+		{name: "question mark unchanged", in: "0 3 * * ?", want: "0 0 3 * * ?"},
+
+		// Named days
+		{name: "uppercase name unchanged", in: "0 3 * * MON", want: "0 0 3 * * MON"},
+		{name: "lowercase name unchanged", in: "0 3 * * sun", want: "0 0 3 * * sun"},
+		{name: "name range unchanged", in: "0 3 * * MON-FRI", want: "0 0 3 * * MON-FRI"},
+		{name: "name list unchanged", in: "0 3 * * Mon,Wed,Fri", want: "0 0 3 * * Mon,Wed,Fri"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -32,6 +61,12 @@ func TestValidateCron(t *testing.T) {
 			if err := ValidateCron(expr); err != nil {
 				t.Errorf("ValidateCron(%q) = %v, want nil", expr, err)
 			}
+		}
+	})
+
+	t.Run("accepts unix sunday 0", func(t *testing.T) {
+		if err := ValidateCron("0 3 * * 0"); err != nil {
+			t.Errorf("ValidateCron(%q) = %v, want nil", "0 3 * * 0", err)
 		}
 	})
 
