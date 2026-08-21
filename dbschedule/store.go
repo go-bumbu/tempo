@@ -114,13 +114,19 @@ func (s *Store) Delete(ctx context.Context, id uuid.UUID) error {
 
 func toRow(sch schedule.Schedule) row {
 	return row{
-		ID:        sch.ID.String(),
-		TaskName:  sch.TaskName,
-		Cron:      sch.Cron,
-		Params:    []byte(sch.Params),
-		Enabled:   sch.Enabled,
-		CreatedAt: sch.CreatedAt,
-		UpdatedAt: sch.UpdatedAt,
+		ID:       sch.ID.String(),
+		TaskName: sch.TaskName,
+		Cron:     sch.Cron,
+		Params:   []byte(sch.Params),
+		Enabled:  sch.Enabled,
+		// Store the instant in UTC. Databases that keep a timestamp as text —
+		// sqlite — would otherwise record the caller's offset, and then
+		// "ORDER BY created_at" compares wall clocks lexicographically instead of
+		// instants, so a row written at 20:00+10:00 sorts after one written later
+		// at 11:00Z. It also keeps CreatedAt from coming back in a nameless fixed
+		// zone.
+		CreatedAt: sch.CreatedAt.UTC(),
+		UpdatedAt: sch.UpdatedAt.UTC(),
 	}
 }
 
