@@ -32,7 +32,7 @@ COVERAGE_THRESHOLD ?= 80
 
 .PHONY: coverage
 coverage: ## check code coverage numbers
-	@go test -coverprofile=coverage.out -covermode=atomic ./ > /dev/null; \
+	@go test -coverprofile=coverage.out -covermode=atomic ./... > /dev/null; \
 	if [ -f coverage.out ]; then \
 		coverage=$$(go tool cover -func=coverage.out | grep total: | awk '{print $$3}' | sed 's/%//'); \
 		if [ $$(echo "$$coverage < $(COVERAGE_THRESHOLD)" | bc -l) -eq 1 ]; then \
