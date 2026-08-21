@@ -273,6 +273,11 @@ func (s *Scheduler) Create(ctx context.Context, sch Schedule) (ScheduleInfo, err
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, err := s.store.Get(ctx, sch.ID); err == nil {
+		return ScheduleInfo{}, ErrScheduleExists
+	} else if !errors.Is(err, ErrScheduleNotFound) {
+		return ScheduleInfo{}, fmt.Errorf("schedule: check existence of %s: %w", sch.ID, err)
+	}
 	if err := s.store.Save(ctx, sch); err != nil {
 		return ScheduleInfo{}, fmt.Errorf("schedule: save %s: %w", sch.ID, err)
 	}

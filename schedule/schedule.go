@@ -18,6 +18,8 @@ import (
 var (
 	// ErrScheduleNotFound is returned when no schedule exists for an id.
 	ErrScheduleNotFound = errors.New("schedule not found")
+	// ErrScheduleExists is returned by Create when the supplied id is already taken.
+	ErrScheduleExists = errors.New("schedule already exists")
 	// ErrNotStarted is returned by write methods called before Start.
 	ErrNotStarted = errors.New("scheduler not started")
 	// ErrUnsafeStop is returned when ShutDown's context expires before all

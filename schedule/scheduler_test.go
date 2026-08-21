@@ -364,7 +364,16 @@ func (f *failingStore) Delete(context.Context, uuid.UUID) error {
 	return ErrScheduleNotFound
 }
 
-//nolint:gocyclo // Test suite with multiple subtests and assertions
+// storeWithFailingDelete wraps a MemStore but makes Delete fail with a custom error.
+type storeWithFailingDelete struct {
+	*MemStore
+	deleteErr error
+}
+
+func (s *storeWithFailingDelete) Delete(context.Context, uuid.UUID) error {
+	return s.deleteErr
+}
+
 func TestCreate(t *testing.T) {
 	ctx := context.Background()
 
@@ -450,30 +459,50 @@ func TestCreate(t *testing.T) {
 		}
 	})
 
-	t.Run("undoes the save when registration fails", func(t *testing.T) {
-		st := NewMemStore()
-		s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if err := s.Start(ctx); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		t.Cleanup(func() { _ = s.ShutDown(ctx) })
-		// A trigger builder that fails makes registration fail after the save.
-		s.newTrigger = func(_ string) (quartz.Trigger, error) {
-			return nil, errors.New("trigger boom")
-		}
+}
 
-		if _, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true}); err == nil {
-			t.Fatal("expected the create to fail")
-		}
-		list, _ := st.List(ctx)
-		if len(list) != 0 {
-			t.Errorf("expected the save to be undone, got %d schedules", len(list))
-		}
-	})
+func TestCreateRejectsAnIdThatAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	s, st, _ := newTestScheduler(t)
+	first, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := s.Create(ctx, Schedule{ID: first.ID, TaskName: "other", Cron: "0 3 * * *", Enabled: true}); !errors.Is(err, ErrScheduleExists) {
+		t.Errorf("expected ErrScheduleExists, got %v", err)
+	}
+	stored, _ := st.Get(ctx, first.ID)
+	if stored.Cron != first.Cron {
+		t.Errorf("expected the original cron to be untouched, got %q", stored.Cron)
+	}
+	if !stored.CreatedAt.Equal(first.CreatedAt) {
+		t.Error("expected CreatedAt to be preserved")
+	}
+}
 
+func TestCreateUndoesTheSaveWhenRegistrationFails(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemStore()
+	s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { _ = s.ShutDown(ctx) })
+	// A trigger builder that fails makes registration fail after the save.
+	s.newTrigger = func(_ string) (quartz.Trigger, error) {
+		return nil, errors.New("trigger boom")
+	}
+
+	if _, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true}); err == nil {
+		t.Fatal("expected the create to fail")
+	}
+	list, _ := st.List(ctx)
+	if len(list) != 0 {
+		t.Errorf("expected the save to be undone, got %d schedules", len(list))
+	}
 }
 
 func TestWritesBeforeStartAreRejected(t *testing.T) {
@@ -574,34 +603,44 @@ func TestUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("restores the previous record when registration fails", func(t *testing.T) {
-		st := NewMemStore()
-		s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if err := s.Start(ctx); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		t.Cleanup(func() { _ = s.ShutDown(ctx) })
-		s.newTrigger = func(_ string) (quartz.Trigger, error) { return quartz.NewSimpleTrigger(time.Hour), nil }
+}
 
-		created, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+func TestUpdateRestoresThePreviousRecordWhenRegistrationFails(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemStore()
+	s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Cleanup(func() { _ = s.ShutDown(ctx) })
+	s.newTrigger = func(_ string) (quartz.Trigger, error) { return quartz.NewSimpleTrigger(time.Hour), nil }
 
-		s.newTrigger = func(_ string) (quartz.Trigger, error) { return nil, errors.New("trigger boom") }
-		updated := created.Schedule
-		updated.Cron = "0 5 * * *"
-		if _, err := s.Update(ctx, updated); err == nil {
-			t.Fatal("expected the update to fail")
+	created, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	s.newTrigger = func(expr string) (quartz.Trigger, error) {
+		if expr == "0 0 5 * * *" {
+			return nil, errors.New("trigger boom")
 		}
-		stored, _ := st.Get(ctx, created.ID)
-		if stored.Cron != "0 0 2 * * *" {
-			t.Errorf("expected the previous cron to be restored, got %q", stored.Cron)
-		}
-	})
+		return quartz.NewSimpleTrigger(time.Hour), nil
+	}
+	updated := created.Schedule
+	updated.Cron = "0 5 * * *"
+	if _, err := s.Update(ctx, updated); err == nil {
+		t.Fatal("expected the update to fail")
+	}
+	stored, _ := st.Get(ctx, created.ID)
+	if stored.Cron != "0 0 2 * * *" {
+		t.Errorf("expected the previous cron to be restored, got %q", stored.Cron)
+	}
+	if !hasJob(t, s, created.ID) {
+		t.Error("expected the previous job to be restored")
+	}
 }
 
 func TestSetEnabled(t *testing.T) {
@@ -690,6 +729,34 @@ func TestDelete(t *testing.T) {
 		s, _, _ := newTestScheduler(t)
 		if err := s.Delete(ctx, uuid.New()); !errors.Is(err, ErrScheduleNotFound) {
 			t.Errorf("expected ErrScheduleNotFound, got %v", err)
+		}
+	})
+
+	t.Run("restores the job when the store delete fails", func(t *testing.T) {
+		wantErr := errors.New("db is readonly")
+		st := &storeWithFailingDelete{MemStore: NewMemStore(), deleteErr: wantErr}
+		s, err := New(Cfg{Store: st, Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		s.newTrigger = func(_ string) (quartz.Trigger, error) {
+			return quartz.NewSimpleTrigger(time.Hour), nil
+		}
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		t.Cleanup(func() { _ = s.ShutDown(ctx) })
+
+		created, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if err := s.Delete(ctx, created.ID); !errors.Is(err, wantErr) {
+			t.Errorf("expected the store error to be wrapped, got %v", err)
+		}
+		if !hasJob(t, s, created.ID) {
+			t.Error("expected the job to be restored after the failed delete")
 		}
 	})
 }
