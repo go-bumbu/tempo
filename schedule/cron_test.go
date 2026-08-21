@@ -54,7 +54,7 @@ func TestNormalizeCron(t *testing.T) {
 		{name: "out-of-range 8 unchanged", in: "0 3 * * 8", want: "0 0 3 * * 8"},
 		{name: "out-of-range 14 unchanged", in: "0 3 * * 14", want: "0 0 3 * * 14"},
 		{name: "out-of-range 100 unchanged", in: "0 3 * * 100", want: "0 0 3 * * 100"},
-		{name: "out-of-range in range unchanged", in: "0 3 * * 0-8", want: "0 0 3 * * 1-8"},
+		{name: "out-of-range bound left untranslated, in-range bound translated", in: "0 3 * * 0-8", want: "0 0 3 * * 1-8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

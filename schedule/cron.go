@@ -16,6 +16,14 @@ import (
 // (7 also Sunday), while Quartz uses 1=Sunday…7=Saturday. Expressions that already
 // carry 6 or more fields are returned trimmed but otherwise unchanged.
 // go-quartz requires the Quartz form.
+//
+// The day-of-week translation covers what Unix cron itself can express: plain
+// numbers, lists, ranges and steps, with named days and wildcards left alone.
+// Quartz-only tokens — "L" for the last such day of the month, "5L", "1#2" for
+// the second occurrence — are passed through as-is, so a 5-field expression
+// carrying one keeps Quartz's numbering rather than Unix's: "0 3 * * 1#2" fires
+// on the second Sunday, not the second Monday a Unix reader would expect. Write
+// the full 6-field Quartz form when using those tokens.
 func NormalizeCron(expr string) string {
 	expr = strings.TrimSpace(expr)
 	fields := strings.Fields(expr)
@@ -33,7 +41,7 @@ func translateDayOfWeek(field string) string {
 	if field == "*" || field == "?" {
 		return field
 	}
-	if strings.HasPrefix(field, "*/") || strings.HasPrefix(field, "?/") {
+	if strings.HasPrefix(field, "*/") {
 		return field
 	}
 
@@ -65,7 +73,7 @@ func translateDayNumber(s string) string {
 	if err != nil || n < 0 || n > 7 {
 		return s
 	}
-	return strconv.Itoa((n%7) + 1)
+	return strconv.Itoa((n % 7) + 1)
 }
 
 // ValidateCron reports whether expr is a cron expression the Scheduler can use.
