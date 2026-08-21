@@ -28,14 +28,12 @@ func NormalizeCron(expr string) string {
 
 // translateDayOfWeek converts Unix day-of-week values (0-7) to Quartz (1-7).
 // Handles single values, lists, ranges, steps, wildcards, and named days.
+// Mixed forms like "MON,6" translate the numeric portion while preserving names.
 func translateDayOfWeek(field string) string {
 	if field == "*" || field == "?" {
 		return field
 	}
 	if strings.HasPrefix(field, "*/") || strings.HasPrefix(field, "?/") {
-		return field
-	}
-	if containsLetter(field) {
 		return field
 	}
 
@@ -64,19 +62,10 @@ func translateDayPart(part string) string {
 
 func translateDayNumber(s string) string {
 	n, err := strconv.Atoi(s)
-	if err != nil {
+	if err != nil || n < 0 || n > 7 {
 		return s
 	}
 	return strconv.Itoa((n%7) + 1)
-}
-
-func containsLetter(s string) bool {
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			return true
-		}
-	}
-	return false
 }
 
 // ValidateCron reports whether expr is a cron expression the Scheduler can use.
