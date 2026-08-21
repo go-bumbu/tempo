@@ -66,6 +66,28 @@ tempo.RunnerCfg{
 }
 ```
 
+## Persistence
+
+By default task state is kept in memory (`tempo.NewMemPersistence()`) and is lost
+on restart. For durable state, pass a `dbqueue` store — a gorm-backed
+`RecoverablePersistence`, kept out of the core package so gorm is not forced on
+callers who do not need it:
+
+```go
+store, err := dbqueue.New(db) // AutoMigrates the tempo_tasks table
+if err != nil {
+    panic(err)
+}
+runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+    Parallelism: 2, QueueSize: 10, Persistence: store,
+})
+```
+
+On startup the runner reloads persisted tasks: a task still **waiting** when the
+process died resumes and runs, while one caught **running** is reconciled to
+**failed** — no worker owns it, and re-running could repeat side effects. The
+in-memory persistence has no `List`, so it recovers nothing.
+
 ## Scheduling
 
 `tempo/schedule` runs tasks on a cron timetable. Schedules are persisted and can
