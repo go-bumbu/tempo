@@ -652,6 +652,48 @@ func TestCreateUndoesTheSaveWhenRegistrationFails(t *testing.T) {
 	}
 }
 
+// TestSchedulerConcurrentCreates guards that the Scheduler's write path is
+// serialized: a burst of concurrent Creates must all persist and all register,
+// with no lost or duplicated jobs. It is the schedule package's only
+// goroutine-concurrency test, so under -race it is what protects s.mu.
+func TestSchedulerConcurrentCreates(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestScheduler(t)
+
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Each Create gets its own generated id, so none collide.
+			_, err := s.Create(ctx, Schedule{TaskName: "scan", Cron: "0 2 * * *", Enabled: true})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Create failed: %v", err)
+		}
+	}
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != n {
+		t.Errorf("expected %d schedules, got %d", n, len(list))
+	}
+	for _, sch := range list {
+		if !hasJob(t, s, sch.ID) {
+			t.Errorf("schedule %s persisted but has no registered job", sch.ID)
+		}
+	}
+}
+
 func TestWritesBeforeStartAreRejected(t *testing.T) {
 	ctx := context.Background()
 	s, err := New(Cfg{Store: NewMemStore(), Enqueuer: &fakeEnqueuer{}, Logger: quietLogger()})

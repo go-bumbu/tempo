@@ -155,22 +155,43 @@ func NewTaskQueue(cfg TaskQueueCfg) *TaskQueue {
 		persist:    p,
 	}
 	q.cond = sync.NewCond(&q.mu)
-	if r, ok := p.(RecoverablePersistence); ok {
-		if list, err := r.List(context.Background()); err == nil && len(list) > 0 {
-			for _, info := range list {
-				q.tasks = append(q.tasks, &taskRecord{
-					id:        info.ID,
-					name:      info.Name,
-					status:    info.Status,
-					queuedAt:  info.QueuedAt,
-					startedAt: info.StartedAt,
-					endedAt:   info.EndedAt,
-					params:    info.Params,
-				})
-			}
-		}
-	}
+	q.recoverTasks(p)
 	return q
+}
+
+// recoverTasks loads any persisted tasks into the queue (e.g. after a restart).
+// A task persisted as Running was in-flight when the process died; no worker
+// owns it now. NextTask only claims Waiting tasks and CleanHistory only trims
+// terminal ones, so leaving it Running orphans it forever — it is recovered as
+// Failed (terminal) instead.
+func (q *TaskQueue) recoverTasks(p TaskStatePersistence) {
+	r, ok := p.(RecoverablePersistence)
+	if !ok {
+		return
+	}
+	list, err := r.List(context.Background())
+	if err != nil {
+		return
+	}
+	for _, info := range list {
+		rec := &taskRecord{
+			id:        info.ID,
+			name:      info.Name,
+			status:    info.Status,
+			queuedAt:  info.QueuedAt,
+			startedAt: info.StartedAt,
+			endedAt:   info.EndedAt,
+			params:    info.Params,
+		}
+		if rec.status == TaskStatusRunning {
+			rec.status = TaskStatusFailed
+			if rec.endedAt.IsZero() {
+				rec.endedAt = time.Now()
+			}
+			_ = p.SaveTask(context.Background(), q.recordToInfo(rec))
+		}
+		q.tasks = append(q.tasks, rec)
+	}
 }
 
 // Add enqueues a task by name with an opaque payload. Returns the new task id or ErrQueueFull.
@@ -199,6 +220,16 @@ func (q *TaskQueue) Add(name string, params []byte) (uuid.UUID, error) {
 // atomically marking it Running. Blocks until an eligible task exists or ctx
 // is done. canClaim filters by task name.
 func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) bool) (uuid.UUID, string, []byte, error) {
+	// Wake a parked cond.Wait when ctx is canceled. The callback takes q.mu
+	// before broadcasting, so it cannot fire in the gap between the ctx.Err()
+	// check below and cond.Wait (which atomically releases q.mu): no lost wakeup.
+	stop := context.AfterFunc(ctx, func() {
+		q.mu.Lock()
+		q.cond.Broadcast()
+		q.mu.Unlock()
+	})
+	defer stop()
+
 	q.mu.Lock()
 	for {
 		for _, t := range q.tasks {
@@ -215,13 +246,11 @@ func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) boo
 			q.mu.Unlock()
 			return id, name, params, nil
 		}
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
 			q.mu.Unlock()
-			return uuid.Nil, "", nil, ctx.Err()
-		default:
-			q.cond.Wait()
+			return uuid.Nil, "", nil, err
 		}
+		q.cond.Wait()
 	}
 }
 

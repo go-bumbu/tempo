@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-bumbu/tempo"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/uuid"
 )
 
 // newTestRunner creates a QueueRunner; if cfg.Persistence is nil, in-memory persistence is used. Use r.RegisterRaw to add task definitions.
@@ -491,6 +493,139 @@ func TestRunnerRaceConditions(t *testing.T) {
 		})
 	})
 
+}
+
+// gatedLogSink blocks the worker inside the very first log call it makes for a
+// task — the "task started" line — until release is closed, and signals entered
+// when it gets there. It lets a test freeze a worker in the window between
+// claiming a task and recording its run-state.
+type gatedLogSink struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *gatedLogSink) Append(_ context.Context, _ uuid.UUID, _ string, _ string) error {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return nil
+}
+
+// TestRunnerCancelRacesTaskRegistration exposes a race between Cancel and a
+// worker that has just claimed a task but has not yet recorded its run-state.
+//
+// A worker marks a task Running (in the queue) inside NextTask, then only a few
+// statements later records the cancelable run-state in r.running. Cancel looks
+// the task up in r.running first; not finding it there, it falls back to the
+// queue, sees Running, and returns "task ... not found in runner" — refusing to
+// cancel a task that is genuinely present and about to execute, and leaving it
+// uncanceled.
+//
+// The window is normally tiny, but the "task started" log line the worker emits
+// (when a LogSink is configured) sits inside it, so a slow sink holds the worker
+// there deterministically. LogSink is a real feature, so this is an ordering a
+// production sink can genuinely expose.
+//
+// EXPECTED TO FAIL until the run-state is recorded no later than the task
+// becomes observable as Running.
+func TestRunnerCancelRacesTaskRegistration(t *testing.T) {
+	sink := &gatedLogSink{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, LogSink: sink})
+	r.RegisterRaw("blocked-start", func(ctx context.Context, _ []byte) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	r.StartBg()
+
+	id, err := r.AddRaw("blocked-start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The worker has claimed the task (queue status is Running) and is parked in
+	// the "task started" log call, before it recorded the run-state.
+	<-sink.entered
+
+	// The task is present and Running, so this cancel must not report it absent.
+	// A short timeout keeps the call bounded: a fix that finds the task and waits
+	// on its done channel returns a cancel-timeout here (the worker is still
+	// gated), which is fine — what must not happen is "not found in runner".
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	cancelErr := r.Cancel(cancelCtx, id)
+
+	// Let the worker proceed and shut the runner down cleanly, even if the
+	// assertion below fails.
+	close(sink.release)
+	defer func() {
+		ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		_ = r.ShutDown(ctx)
+	}()
+
+	if cancelErr != nil && strings.Contains(cancelErr.Error(), "not found in runner") {
+		t.Fatalf("Cancel refused a claimed, running task it could not see in r.running: %v", cancelErr)
+	}
+}
+
+// TestRunnerShutDownIsIdempotent guards that a second ShutDown is a no-op and
+// that Wait returns after shutdown. stopOnce/stopChan are exactly the kind of
+// primitive a refactor can break into a double-close panic.
+func TestRunnerShutDownIsIdempotent(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
+		r.RegisterRaw("noop", func(ctx context.Context, _ []byte) error { return nil })
+		r.StartBg()
+
+		if err := r.ShutDown(context.Background()); err != nil {
+			t.Fatalf("first shutdown: %v", err)
+		}
+		if err := r.ShutDown(context.Background()); err != nil {
+			t.Errorf("a second shutdown should be a no-op, got %v", err)
+		}
+		r.Wait() // must return promptly once shut down
+	})
+}
+
+// TestRunnerCancelErrors guards the two error paths of Cancel that no test
+// currently covers: an unknown id, and a task that is already terminal.
+func TestRunnerCancelErrors(t *testing.T) {
+	t.Run("unknown id returns ErrTaskNotFound", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
+			r.StartBg()
+			if err := r.Cancel(context.Background(), uuid.New()); !errors.Is(err, tempo.ErrTaskNotFound) {
+				t.Errorf("expected ErrTaskNotFound, got %v", err)
+			}
+			_ = r.ShutDown(context.Background())
+		})
+	})
+
+	t.Run("a completed task is not cancelable", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
+			r.RegisterRaw("quick", func(ctx context.Context, _ []byte) error { return nil })
+			r.StartBg()
+			id, err := r.AddRaw("quick", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(1 * time.Minute) // let it complete
+			if info, _ := r.GetTask(id); info.Status != tempo.TaskStatusComplete {
+				t.Fatalf("precondition: expected task complete, got %s", info.Status.Str())
+			}
+			err = r.Cancel(context.Background(), id)
+			if err == nil || !strings.Contains(err.Error(), "not cancelable") {
+				t.Errorf("expected a 'not cancelable' error for a completed task, got %v", err)
+			}
+			_ = r.ShutDown(context.Background())
+		})
+	})
 }
 
 func TestRunnerCatchPanic(t *testing.T) {

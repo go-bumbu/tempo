@@ -130,15 +130,20 @@ func (r *QueueRunner) StartBg() {
 				}
 
 				childCtx, taskCancel := context.WithCancel(r.ctx)
+				// Record the cancelable run-state before the "task started" log: a
+				// slow LogSink can park the worker in that log call while the queue
+				// already shows the task Running. A Cancel arriving in that window
+				// must find the task here, not see Running in the queue and wrongly
+				// report it absent from the runner.
+				done := make(chan struct{})
+				r.runMu.Lock()
+				r.running[id] = runState{cancel: taskCancel, done: done}
+				r.runMu.Unlock()
 				if r.logSink != nil {
 					childCtx = context.WithValue(childCtx, taskIDKey, id)
 					childCtx = context.WithValue(childCtx, taskLoggerKey, r.taskLogger)
 					r.appendTaskLog(childCtx, id, "INFO", "task started")
 				}
-				done := make(chan struct{})
-				r.runMu.Lock()
-				r.running[id] = runState{cancel: taskCancel, done: done}
-				r.runMu.Unlock()
 
 				var finalStatus TaskStatus
 				var finalEndedAt time.Time

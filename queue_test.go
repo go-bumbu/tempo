@@ -316,6 +316,81 @@ func TestQueueUnblock(t *testing.T) {
 	}
 }
 
+// TestQueueNextTaskUnblocksOnContextCancel documents the contract NextTask
+// states in its own doc comment: it "Blocks until an eligible task exists or
+// ctx is done". A caller that cancels the context while NextTask is parked in
+// cond.Wait therefore expects it to return promptly with ctx.Err().
+//
+// It currently does not: cancelling the context never signals the cond, so the
+// blocked call is only ever woken by an unrelated Add (Signal) or UnblockAll
+// (Broadcast). With neither, NextTask is stuck forever — a missed-wakeup that
+// leaks the goroutine. The runner hides this by wiring ctx.Done to UnblockAll,
+// but TaskQueue is exported and usable on its own, where nothing does that.
+//
+// EXPECTED TO FAIL until NextTask selects on ctx while waiting.
+func TestQueueNextTaskUnblocksOnContextCancel(t *testing.T) {
+	tq := newTestQueue(10)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := tq.NextTask(ctx, nil)
+		done <- err
+	}()
+
+	// Let the goroutine reach cond.Wait. The queue is empty, so once it has
+	// scanned and found nothing it parks there until something signals it.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		// Release the parked goroutine so it does not linger for the rest of the
+		// suite: after this Broadcast it re-scans, sees ctx is done, and returns.
+		tq.UnblockAll()
+		t.Fatal("NextTask did not return after its context was canceled (parked in cond.Wait with no signal)")
+	}
+}
+
+// TestQueueNextTaskCanClaimFilter guards NextTask's name-filtering: every other
+// test calls it with a nil canClaim, so the "skip tasks this worker cannot
+// claim, take the right one, leave the rest Waiting" path has no direct
+// coverage at the queue level.
+func TestQueueNextTaskCanClaimFilter(t *testing.T) {
+	ctx := context.Background()
+	tq := newTestQueue(10)
+	// Insertion order fixes the order NextTask scans in.
+	idA, _ := tq.Add("a", nil)
+	_, _ = tq.Add("b", nil)
+	idC, _ := tq.Add("c", nil)
+
+	// A filter that admits only "c": NextTask must skip a and b, claim c, and
+	// leave a and b Waiting.
+	gotID, gotName, _, err := tq.NextTask(ctx, func(name string) bool { return name == "c" })
+	if err != nil {
+		t.Fatalf("NextTask: %v", err)
+	}
+	if gotName != "c" || gotID != idC {
+		t.Fatalf("expected to claim c (%v), got %q (%v)", idC, gotName, gotID)
+	}
+	if info, _ := tq.Get(ctx, idA); info.Status != TaskStatusWaiting {
+		t.Errorf("expected a to stay Waiting after a filtered claim, got %s", info.Status.Str())
+	}
+
+	// A filter that admits a and b now claims a — first in scan order.
+	gotID2, gotName2, _, err := tq.NextTask(ctx, func(name string) bool { return name == "a" || name == "b" })
+	if err != nil {
+		t.Fatalf("NextTask: %v", err)
+	}
+	if gotName2 != "a" || gotID2 != idA {
+		t.Fatalf("expected to claim a (%v) first, got %q (%v)", idA, gotName2, gotID2)
+	}
+}
+
 func TestQueueConcurrency(t *testing.T) {
 	ctx := context.Background()
 	t.Run("concurrent operations", func(t *testing.T) {
@@ -533,6 +608,39 @@ func (m *recoverableMemPersistence) List(ctx context.Context) ([]TaskInfo, error
 		out = append(out, t)
 	}
 	return out, nil
+}
+
+// TestQueueRecoveryMarksInFlightRunningAsFailed pins the intended recovery
+// behavior: a task persisted as Running (in-flight when the process died) must
+// come back terminal, not stuck Running. NextTask only ever claims Waiting
+// tasks and CleanHistory only trims terminal ones, so a recovered Running task
+// is otherwise orphaned forever — never re-run, never cleaned.
+//
+// EXPECTED TO FAIL until NewTaskQueue rewrites a recovered Running status to
+// Failed on load.
+func TestQueueRecoveryMarksInFlightRunningAsFailed(t *testing.T) {
+	ctx := context.Background()
+	persist := newRecoverableMemPersistence()
+	id := uuid.New()
+	// Simulate a crash: the task was Running when the process died.
+	if err := persist.SaveTask(ctx, TaskInfo{
+		ID:        id,
+		Name:      "scan",
+		Status:    TaskStatusRunning,
+		QueuedAt:  time.Now(),
+		StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 10, Persistence: persist})
+	info, err := tq.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after recovery: %v", err)
+	}
+	if info.Status != TaskStatusFailed {
+		t.Errorf("recovered in-flight task: got status %s, want failed (it is otherwise orphaned)", info.Status.Str())
+	}
 }
 
 func TestQueueParamsRecovered(t *testing.T) {
