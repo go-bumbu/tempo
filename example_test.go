@@ -111,7 +111,8 @@ func ExampleMemTaskLogSink() {
 	_ = qrun.ShutDown(shutdownCtx)
 
 	// retrieve and print logs for this task
-	for _, e := range logSink.Logs(id) {
+	entries, _ := logSink.Logs(context.Background(), id)
+	for _, e := range entries {
 		fmt.Printf("%s: %s\n", e.Level, e.Message)
 	}
 
