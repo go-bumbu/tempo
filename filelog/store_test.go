@@ -47,18 +47,34 @@ func TestLogsUnknownIDIsNil(t *testing.T) {
 func TestConcurrentAppend(t *testing.T) {
 	ctx := context.Background()
 	s, _ := filelog.New(filelog.Config{Dir: t.TempDir()})
+	// All goroutines write the SAME task id, so the per-id striped lock is
+	// actually contended: this is what proves same-file writes are serialized,
+	// rather than each goroutine quietly writing to its own untouched file.
+	id := uuid.New()
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			id := uuid.New()
 			for j := 0; j < 20; j++ {
-				_ = s.Append(ctx, id, "INFO", "line")
+				if err := s.Append(ctx, id, "INFO", "line"); err != nil {
+					t.Errorf("Append: %v", err)
+				}
 			}
 		}()
 	}
 	wg.Wait()
+
+	// The exact count is the real proof the lock serializes same-file writes:
+	// -race alone can't catch this, since Append opens a fresh *os.File per
+	// call, so concurrent same-path writes aren't an instrumented memory race.
+	got, err := s.Logs(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 400 {
+		t.Fatalf("Logs = %d entries, want 400 (20 goroutines x 20 appends)", len(got))
+	}
 }
 
 func TestRemoveTasks(t *testing.T) {
@@ -86,9 +102,16 @@ func TestRetainOnly(t *testing.T) {
 	keep, drop := uuid.New(), uuid.New()
 	_ = s.Append(ctx, keep, "INFO", "k")
 	_ = s.Append(ctx, drop, "INFO", "d")
-	// a foreign file must be left untouched
+	// a foreign file must be left untouched (filtered by extension, before the
+	// uuid.Parse guard ever runs)
 	foreign := filepath.Join(dir, "notes.txt")
 	if err := os.WriteFile(foreign, []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// a .jsonl file whose stem is not a valid uuid must also survive: this one
+	// passes the extension filter and exercises the uuid.Parse guard itself.
+	scratch := filepath.Join(dir, "scratch.jsonl")
+	if err := os.WriteFile(scratch, []byte("hi"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RetainOnly(ctx, []uuid.UUID{keep}); err != nil {
@@ -102,6 +125,9 @@ func TestRetainOnly(t *testing.T) {
 	}
 	if _, err := os.Stat(foreign); err != nil {
 		t.Fatalf("foreign file was touched: %v", err)
+	}
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("non-uuid .jsonl file was touched: %v", err)
 	}
 }
 
