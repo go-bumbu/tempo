@@ -33,7 +33,7 @@ type ScanParams struct {
 }
 
 // register a typed task
-tempo.Register(runner, "scan", func(ctx context.Context, p ScanParams) error {
+tempo.Register(runner, "scan", func(ctx context.Context, log *slog.Logger, p ScanParams) error {
     fmt.Printf("scan mode=%s\n", p.Mode)
     return nil
 })
@@ -143,6 +143,39 @@ A fire that cannot be enqueued — a full queue, an unregistered task name — i
 logged and dropped. Fires missed while the process was down are not replayed,
 and a fire is enqueued even if the previous run is still going; use
 `tempo.WithMaxParallelism(1)` to stop a task running concurrently with itself.
+
+## Task logs
+
+Each task handler receives a `*slog.Logger` as its second argument. Anything it
+logs is routed to the runner's configured `LogSink`, tagged with the task id:
+
+    r.RegisterRaw("resize", func(ctx context.Context, log *slog.Logger, params []byte) error {
+        log.Info("started", "bytes", len(params))
+        return nil
+    })
+
+Configure a sink on the runner with `RunnerCfg.LogSink` and the minimum level
+with `RunnerCfg.LogLevel`. With no sink, the logger discards. Lifecycle lines
+("task started/finished/canceled") are always recorded regardless of `LogLevel`.
+
+A sink implements `TaskLogSink` (write). It may also implement `TaskLogReader`
+(`Logs`) to read a task's lines back, and `TaskLogCleaner` (`RemoveTasks` /
+`RetainOnly`) so the runner can reap them. Two built-in sinks:
+
+- `tempo.MemTaskLogSink` — in-memory; implements all three.
+- `filelog.New(filelog.Config{Dir: "..."})` — one JSON-Lines file per task on
+  disk; implements all three.
+
+### Retention
+
+Logs live exactly as long as their task: when the runner trims a task from
+history it removes that task's logs, and at startup it sweeps orphaned logs for
+tasks it no longer knows about. There is no separate TTL.
+
+Because `filelog` files outlive the process, pair it with a
+`RecoverablePersistence` such as `dbqueue` if you want logs to survive restarts.
+With the default in-memory persistence, the startup sweep deletes every prior
+log file, since no task state remains to correlate them with.
 
 ## How To
 
