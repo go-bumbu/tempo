@@ -88,6 +88,15 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		running:      make(map[uuid.UUID]runState),
 		runningCount: make(map[string]int),
 	}
+
+	if c, ok := cfg.LogSink.(TaskLogCleaner); ok {
+		list, _ := queue.List(context.Background())
+		ids := make([]uuid.UUID, 0, len(list))
+		for _, info := range list {
+			ids = append(ids, info.ID)
+		}
+		_ = c.RetainOnly(context.Background(), ids)
+	}
 	return r, nil
 }
 
@@ -219,10 +228,21 @@ func (r *QueueRunner) autoClean() {
 	for {
 		select {
 		case <-ticker.C:
-			_, _ = r.queue.CleanHistory(context.Background(), r.historySize)
+			r.cleanupOnce(context.Background())
 		case <-r.stopChan:
 			return
 		}
+	}
+}
+
+// cleanupOnce trims task history and reaps the log files of the trimmed tasks.
+func (r *QueueRunner) cleanupOnce(ctx context.Context) {
+	removed, _ := r.queue.CleanHistory(ctx, r.historySize)
+	if len(removed) == 0 {
+		return
+	}
+	if c, ok := r.logSink.(TaskLogCleaner); ok {
+		_ = c.RemoveTasks(ctx, removed)
 	}
 }
 
