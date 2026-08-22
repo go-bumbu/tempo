@@ -7,6 +7,11 @@
 // (e.g. dbqueue) if you want logs to survive restarts; with the default
 // in-memory persistence the startup sweep deletes every prior file, as nothing
 // is left to correlate them with.
+//
+// A Dir must be owned by exactly one runner: on startup a runner's orphan
+// sweep (RetainOnly) deletes every log file in Dir for a task not in that
+// runner's own recovered set, so pointing two runners — or sharing one Store
+// — at the same Dir will delete each other's live task logs.
 package filelog
 
 import (

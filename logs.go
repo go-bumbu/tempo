@@ -52,6 +52,10 @@ func (h *sinkHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.minLevel
 }
 
+// Handle renders the message and its attrs as a single flat "key=value"
+// string, group-qualified with dots. Inline slog.Group(...) values are NOT
+// flattened and slog.LogValuer values are NOT resolved — both render as-is
+// via Value.String().
 func (h *sinkHandler) Handle(ctx context.Context, r slog.Record) error {
 	msg := r.Message
 	for _, a := range h.attrs {

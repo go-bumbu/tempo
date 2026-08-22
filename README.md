@@ -149,10 +149,12 @@ and a fire is enqueued even if the previous run is still going; use
 Each task handler receives a `*slog.Logger` as its second argument. Anything it
 logs is routed to the runner's configured `LogSink`, tagged with the task id:
 
-    r.RegisterRaw("resize", func(ctx context.Context, log *slog.Logger, params []byte) error {
-        log.Info("started", "bytes", len(params))
-        return nil
-    })
+```go
+r.RegisterRaw("resize", func(ctx context.Context, log *slog.Logger, params []byte) error {
+    log.Info("started", "bytes", len(params))
+    return nil
+})
+```
 
 Configure a sink on the runner with `RunnerCfg.LogSink` and the minimum level
 with `RunnerCfg.LogLevel`. With no sink, the logger discards. Lifecycle lines
