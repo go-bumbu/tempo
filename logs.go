@@ -81,6 +81,9 @@ func (h *sinkHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 }
 
 func (h *sinkHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
 	nh := *h
 	if h.group == "" {
 		nh.group = name

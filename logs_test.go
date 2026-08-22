@@ -112,6 +112,65 @@ func TestRunnerPerTaskLogIsolation(t *testing.T) {
 	})
 }
 
+// TestWithGroupEmptyIsNoop guards slog's Handler contract: "If the name is
+// empty, WithGroup returns the receiver." *slog.Logger.WithGroup already
+// special-cases the empty name before it ever reaches a Handler, so the
+// plain call below can't by itself expose a regression. To actually drive
+// sinkHandler.WithGroup("") once a real group is already set, the test goes
+// through Logger.Handler() to bypass that shortcut, mirroring the
+// task-handler-driven style of TestTaskLoggerRendersAttrs.
+func TestWithGroupEmptyIsNoop(t *testing.T) {
+	ctx := context.Background()
+	sink := tempo.NewMemTaskLogSink()
+	r, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 1, QueueSize: 10, Persistence: tempo.NewMemPersistence(),
+		LogSink: sink, LogLevel: slog.LevelInfo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.RegisterRaw("t", func(_ context.Context, log *slog.Logger, _ []byte) error {
+		// The exact call the empty-group contract describes.
+		log.WithGroup("").Info("plain", "k", 1)
+
+		// Bypass *slog.Logger's own empty-name shortcut by grabbing the raw
+		// Handler, so an empty WithGroup after a real one ("g") is forced
+		// through sinkHandler.WithGroup itself.
+		h := log.Handler().WithGroup("g").WithGroup("")
+		slog.New(h).Info("grouped", "k", 2)
+		return nil
+	})
+	r.StartBg()
+	id, err := r.AddRaw("t", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, r, id)
+	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = r.ShutDown(sctx)
+
+	entries, _ := sink.Logs(ctx, id)
+	var gotPlain, gotGrouped bool
+	for _, e := range entries {
+		if strings.Contains(e.Message, "..") {
+			t.Errorf("message has a doubled group dot: %q", e.Message)
+		}
+		switch e.Message {
+		case "plain k=1":
+			gotPlain = true
+		case "grouped g.k=2":
+			gotGrouped = true
+		}
+	}
+	if !gotPlain {
+		t.Errorf("rendered line %q not found in %+v", "plain k=1", entries)
+	}
+	if !gotGrouped {
+		t.Errorf("rendered line %q not found in %+v", "grouped g.k=2", entries)
+	}
+}
+
 // TestRunnerLogLevelFiltering guards LogLevel: a handler log below the
 // configured level must not reach the sink, while one at or above it must. The
 // examples only ever configure LevelInfo, so the filtering path itself is
