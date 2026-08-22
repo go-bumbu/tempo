@@ -185,7 +185,7 @@ func TestQueueCleanHistoryNoTerminalTasks(t *testing.T) {
 	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 1})
 	_, _ = tq.Add("a", nil)
 	_, _ = tq.Add("b", nil)
-	_ = tq.CleanHistory(ctx, 1)
+	_, _ = tq.CleanHistory(ctx, 1)
 	list, _ := tq.List(ctx)
 	if len(list) != 2 {
 		t.Errorf("expected 2 tasks, got %d", len(list))
@@ -207,7 +207,7 @@ func TestQueueCleanHistoryLessThanMaxDone(t *testing.T) {
 			_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
 		}
 	}
-	_ = tq.CleanHistory(ctx, 3)
+	_, _ = tq.CleanHistory(ctx, 3)
 	list, _ = tq.List(ctx)
 	if len(list) != 3 {
 		t.Errorf("expected 3 tasks, got %d", len(list))
@@ -229,7 +229,7 @@ func TestQueueCleanHistoryMoreThanMaxDone(t *testing.T) {
 			_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
 		}
 	}
-	_ = tq.CleanHistory(ctx, 2)
+	_, _ = tq.CleanHistory(ctx, 2)
 
 	list, _ = tq.List(ctx)
 	doneCount := countStatus(list, TaskStatusComplete) + countStatus(list, TaskStatusPanicked)
@@ -263,7 +263,7 @@ func TestQueueCleanHistoryMixPreservesOrder(t *testing.T) {
 			_ = tq.SetStatus(ctx, task.ID, TaskStatusPanicked, time.Time{}, time.Now())
 		}
 	}
-	_ = tq.CleanHistory(ctx, 2)
+	_, _ = tq.CleanHistory(ctx, 2)
 
 	list, _ = tq.List(ctx)
 	doneCount := 0
@@ -282,6 +282,29 @@ func TestQueueCleanHistoryMixPreservesOrder(t *testing.T) {
 	want := []TaskStatus{TaskStatusWaiting, TaskStatusPanicked, TaskStatusWaiting, TaskStatusFailed, TaskStatusWaiting}
 	if diff := cmp.Diff(gotOrder, want); diff != "" {
 		t.Errorf("unexpected order (-got +want)\n%s", diff)
+	}
+}
+
+func TestCleanHistoryReturnsRemovedIDs(t *testing.T) {
+	ctx := context.Background()
+	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 10})
+	var ids []uuid.UUID
+	for i := 0; i < 3; i++ {
+		id, err := tq.Add("t", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tq.SetStatus(ctx, id, TaskStatusComplete, time.Time{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	removed, err := tq.CleanHistory(ctx, 1) // keep 1 of 3 terminal -> remove 2 oldest
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 2 || removed[0] != ids[0] || removed[1] != ids[1] {
+		t.Fatalf("removed = %v, want first two of %v", removed, ids)
 	}
 }
 

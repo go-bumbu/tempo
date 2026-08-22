@@ -221,7 +221,7 @@ func (r *QueueRunner) autoClean() {
 	for {
 		select {
 		case <-ticker.C:
-			_ = r.queue.CleanHistory(context.Background(), r.historySize)
+			_, _ = r.queue.CleanHistory(context.Background(), r.historySize)
 		case <-r.stopChan:
 			return
 		}
