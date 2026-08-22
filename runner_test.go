@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,7 +39,7 @@ func TestTaskData(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 3, QueueSize: 20})
-		r.RegisterRaw("some action", func(ctx context.Context, _ []byte) error {
+		r.RegisterRaw("some action", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 			time.Sleep(10 * time.Minute)
 			return nil
 		})
@@ -86,7 +88,7 @@ func TestRunnerParallelism(t *testing.T) {
 			for i := 1; i <= 4; i++ {
 				n := i
 				name := strconv.Itoa(n)
-				r.RegisterRaw(name, func(ctx context.Context, _ []byte) error {
+				r.RegisterRaw(name, func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 					lock.Lock()
 					result = append(result, strconv.Itoa(n))
 					lock.Unlock()
@@ -131,7 +133,7 @@ func TestRunnerParallelism(t *testing.T) {
 			for i := 1; i <= 12; i++ {
 				n := i
 				name := strconv.Itoa(n)
-				r.RegisterRaw(name, func(ctx context.Context, _ []byte) error {
+				r.RegisterRaw(name, func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 					lock.Lock()
 					result = append(result, strconv.Itoa(n))
 					lock.Unlock()
@@ -178,7 +180,7 @@ func TestRunnerParallelism(t *testing.T) {
 func TestRunnerLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		r.RegisterRaw("some action", func(ctx context.Context, _ []byte) error {
+		r.RegisterRaw("some action", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 			time.Sleep(10 * time.Minute)
 			return nil
 		})
@@ -215,8 +217,11 @@ func TestRunnerHistoryClean(t *testing.T) {
 	t.Run("big history", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, HistorySize: 50})
-			r.RegisterRaw("success", func(ctx context.Context, _ []byte) error { time.Sleep(1 * time.Minute); return nil })
-			r.RegisterRaw("fail", func(ctx context.Context, _ []byte) error { time.Sleep(1 * time.Minute); return fmt.Errorf("fail task") })
+			r.RegisterRaw("success", func(ctx context.Context, _ *slog.Logger, _ []byte) error { time.Sleep(1 * time.Minute); return nil })
+			r.RegisterRaw("fail", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+				time.Sleep(1 * time.Minute)
+				return fmt.Errorf("fail task")
+			})
 			r.StartBg()
 
 			for i := 1; i <= 10; i++ {
@@ -261,8 +266,11 @@ func TestRunnerHistoryClean(t *testing.T) {
 	t.Run("expect clean with small history", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, HistorySize: 5})
-			r.RegisterRaw("success", func(ctx context.Context, _ []byte) error { time.Sleep(1 * time.Minute); return nil })
-			r.RegisterRaw("fail", func(ctx context.Context, _ []byte) error { time.Sleep(1 * time.Minute); return fmt.Errorf("fail task") })
+			r.RegisterRaw("success", func(ctx context.Context, _ *slog.Logger, _ []byte) error { time.Sleep(1 * time.Minute); return nil })
+			r.RegisterRaw("fail", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+				time.Sleep(1 * time.Minute)
+				return fmt.Errorf("fail task")
+			})
 			r.StartBg()
 
 			for i := 1; i <= 10; i++ {
@@ -312,7 +320,7 @@ func TestRunnerShutdown(t *testing.T) {
 			var result []string
 			lock := sync.Mutex{}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 10})
-			r.RegisterRaw("1", func(ctx context.Context, _ []byte) error {
+			r.RegisterRaw("1", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 				select {
 				case <-time.After(10 * time.Minute):
 					lock.Lock()
@@ -327,7 +335,7 @@ func TestRunnerShutdown(t *testing.T) {
 					return nil
 				}
 			})
-			r.RegisterRaw("2", func(ctx context.Context, _ []byte) error {
+			r.RegisterRaw("2", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 				select {
 				case <-time.After(10 * time.Minute):
 					lock.Lock()
@@ -377,7 +385,7 @@ func TestRunnerShutdown(t *testing.T) {
 			var result []string
 			lock := sync.Mutex{}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 10})
-			r.RegisterRaw("1", func(ctx context.Context, _ []byte) error {
+			r.RegisterRaw("1", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 				select {
 				case <-time.After(10 * time.Minute):
 					lock.Lock()
@@ -392,7 +400,7 @@ func TestRunnerShutdown(t *testing.T) {
 					return nil
 				}
 			})
-			r.RegisterRaw("2", func(ctx context.Context, _ []byte) error {
+			r.RegisterRaw("2", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 				select {
 				case <-time.After(10 * time.Minute):
 					lock.Lock()
@@ -448,7 +456,7 @@ func TestRunnerRaceConditions(t *testing.T) {
 	t.Run("max parallelism reached", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20, HistorySize: 10})
-			r.RegisterRaw("some action", func(ctx context.Context, _ []byte) error {
+			r.RegisterRaw("some action", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 				time.Sleep(10 * time.Minute)
 				return nil
 			})
@@ -536,7 +544,7 @@ func TestRunnerCancelRacesTaskRegistration(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, LogSink: sink})
-	r.RegisterRaw("blocked-start", func(ctx context.Context, _ []byte) error {
+	r.RegisterRaw("blocked-start", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -579,7 +587,7 @@ func TestRunnerCancelRacesTaskRegistration(t *testing.T) {
 func TestRunnerShutDownIsIdempotent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		r.RegisterRaw("noop", func(ctx context.Context, _ []byte) error { return nil })
+		r.RegisterRaw("noop", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return nil })
 		r.StartBg()
 
 		if err := r.ShutDown(context.Background()); err != nil {
@@ -609,7 +617,7 @@ func TestRunnerCancelErrors(t *testing.T) {
 	t.Run("a completed task is not cancelable", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-			r.RegisterRaw("quick", func(ctx context.Context, _ []byte) error { return nil })
+			r.RegisterRaw("quick", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return nil })
 			r.StartBg()
 			id, err := r.AddRaw("quick", nil)
 			if err != nil {
@@ -631,7 +639,7 @@ func TestRunnerCancelErrors(t *testing.T) {
 func TestRunnerCatchPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
-		r.RegisterRaw("some action", func(ctx context.Context, _ []byte) error {
+		r.RegisterRaw("some action", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 			time.Sleep(1 * time.Minute)
 			panic("panic")
 		})
@@ -680,8 +688,8 @@ func TestRunnerCancel(t *testing.T) {
 				}
 			}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 20})
-			r.RegisterRaw("running task", func(ctx context.Context, _ []byte) error { return fn(ctx) })
-			r.RegisterRaw("waiting task", func(ctx context.Context, _ []byte) error { return fn(ctx) })
+			r.RegisterRaw("running task", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return fn(ctx) })
+			r.RegisterRaw("waiting task", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return fn(ctx) })
 			r.StartBg()
 
 			_, err := r.AddRaw("running task", nil)
@@ -750,7 +758,7 @@ func TestRunnerCancel(t *testing.T) {
 				}
 			}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
-			r.RegisterRaw("timeout_fn", func(ctx context.Context, _ []byte) error { return fn(ctx) })
+			r.RegisterRaw("timeout_fn", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return fn(ctx) })
 			r.StartBg()
 
 			id, err := r.AddRaw("timeout_fn", nil)
@@ -825,7 +833,7 @@ func TestRunnerCancel(t *testing.T) {
 				}
 			}
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 2, QueueSize: 20})
-			r.RegisterRaw("timeout_fn", func(ctx context.Context, _ []byte) error { return fn(ctx) })
+			r.RegisterRaw("timeout_fn", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return fn(ctx) })
 			r.StartBg()
 
 			id, err := r.AddRaw("timeout_fn", nil)
@@ -882,6 +890,94 @@ func TestRunnerCancel(t *testing.T) {
 
 		})
 	})
+}
+
+func waitTerminal(t *testing.T, r *tempo.QueueRunner, id uuid.UUID) tempo.TaskInfo {
+	t.Helper()
+	for i := 0; i < 400; i++ {
+		info, err := r.GetTask(id)
+		if err == nil && slices.Contains(tempo.TaskTerminalStatus, info.Status) {
+			return info
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach a terminal status", id)
+	return tempo.TaskInfo{}
+}
+
+func TestTaskLoggerRendersAttrs(t *testing.T) {
+	ctx := context.Background()
+	sink := tempo.NewMemTaskLogSink()
+	r, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 1, QueueSize: 10, Persistence: tempo.NewMemPersistence(),
+		LogSink: sink, LogLevel: slog.LevelInfo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.RegisterRaw("t", func(_ context.Context, log *slog.Logger, _ []byte) error {
+		log.With("job", "x").Info("done", "count", 5)
+		return nil
+	})
+	r.StartBg()
+	id, err := r.AddRaw("t", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, r, id)
+	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = r.ShutDown(sctx)
+
+	entries, _ := sink.Logs(ctx, id)
+	var found bool
+	for _, e := range entries {
+		if e.Message == "done job=x count=5" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("rendered attr line not found in %+v", entries)
+	}
+}
+
+func TestLifecycleLoggedAboveJobLevel(t *testing.T) {
+	ctx := context.Background()
+	sink := tempo.NewMemTaskLogSink()
+	r, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 1, QueueSize: 10, Persistence: tempo.NewMemPersistence(),
+		LogSink: sink, LogLevel: slog.LevelError, // job-level lines suppressed
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.RegisterRaw("t", func(_ context.Context, log *slog.Logger, _ []byte) error {
+		log.Info("suppressed") // below LogLevel -> dropped
+		return nil
+	})
+	r.StartBg()
+	id, _ := r.AddRaw("t", nil)
+	waitTerminal(t, r, id)
+	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = r.ShutDown(sctx)
+
+	entries, _ := sink.Logs(ctx, id)
+	var started, suppressed bool
+	for _, e := range entries {
+		switch e.Message {
+		case "task started", "task finished":
+			started = true
+		case "suppressed":
+			suppressed = true
+		}
+	}
+	if !started {
+		t.Fatal("lifecycle line missing despite high LogLevel")
+	}
+	if suppressed {
+		t.Fatal("job line below LogLevel should have been dropped")
+	}
 }
 
 // test throw error if task is added before the shceduler was stareted

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 )
@@ -35,7 +36,7 @@ func applyTaskOpts(opts []TaskOption) taskOpts {
 // tempo does not copy the params slice: callers must not mutate a slice passed
 // to AddRaw after the call, and raw handlers must not mutate the params slice
 // they receive.
-func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, params []byte) error, opts ...TaskOption) {
+func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, log *slog.Logger, params []byte) error, opts ...TaskOption) {
 	o := applyTaskOpts(opts)
 	r.registry.add(name, registered{run: fn, maxParallelism: o.maxParallelism})
 }
@@ -50,17 +51,17 @@ func (r *QueueRunner) AddRaw(name string, params []byte) (uuid.UUID, error) {
 
 // Register registers a typed task handler. Parameters are JSON-decoded into T
 // before fn runs; an empty payload yields a zero-value T. T is inferred from fn.
-func Register[T any](r *QueueRunner, name string, fn func(ctx context.Context, params T) error, opts ...TaskOption) {
+func Register[T any](r *QueueRunner, name string, fn func(ctx context.Context, log *slog.Logger, params T) error, opts ...TaskOption) {
 	o := applyTaskOpts(opts)
 	r.registry.add(name, registered{
-		run: func(ctx context.Context, raw []byte) error {
+		run: func(ctx context.Context, log *slog.Logger, raw []byte) error {
 			var p T
 			if len(raw) > 0 {
 				if err := json.Unmarshal(raw, &p); err != nil {
 					return fmt.Errorf("tempo: decode params for task %q: %w", name, err)
 				}
 			}
-			return fn(ctx, p)
+			return fn(ctx, log, p)
 		},
 		maxParallelism: o.maxParallelism,
 	})

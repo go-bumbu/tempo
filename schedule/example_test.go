@@ -25,7 +25,7 @@ func Example() {
 	if err != nil {
 		panic(err)
 	}
-	tempo.Register(runner, "scan", func(_ context.Context, p scanParams) error {
+	tempo.Register(runner, "scan", func(_ context.Context, _ *slog.Logger, p scanParams) error {
 		fmt.Printf("scanning, full=%v\n", p.Full)
 		return nil
 	})

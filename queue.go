@@ -300,8 +300,9 @@ func (q *TaskQueue) SetStatus(ctx context.Context, id uuid.UUID, status TaskStat
 	return ErrTaskNotFound
 }
 
-// CleanHistory removes old terminal tasks so that at most maxDone remain.
-func (q *TaskQueue) CleanHistory(ctx context.Context, maxDone int) error {
+// CleanHistory removes old terminal tasks so that at most maxDone remain, and
+// returns the ids it removed (empty if none).
+func (q *TaskQueue) CleanHistory(ctx context.Context, maxDone int) ([]uuid.UUID, error) {
 	if maxDone <= 0 {
 		maxDone = q.maxDone
 	}
@@ -314,7 +315,7 @@ func (q *TaskQueue) CleanHistory(ctx context.Context, maxDone int) error {
 		}
 	}
 	if maxDone >= doneCount {
-		return nil
+		return nil, nil
 	}
 	skip := doneCount - maxDone
 	var toRemove []uuid.UUID
@@ -329,7 +330,7 @@ func (q *TaskQueue) CleanHistory(ctx context.Context, maxDone int) error {
 	}
 	q.tasks = filtered
 	_ = q.persist.RemoveTasks(ctx, toRemove)
-	return nil
+	return toRemove, nil
 }
 
 // UnblockAll wakes goroutines blocked in NextTask (e.g. for shutdown).

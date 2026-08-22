@@ -14,6 +14,46 @@ import (
 	"github.com/google/uuid"
 )
 
+// compile-time: MemTaskLogSink satisfies the optional interfaces
+var (
+	_ tempo.TaskLogReader  = (*tempo.MemTaskLogSink)(nil)
+	_ tempo.TaskLogCleaner = (*tempo.MemTaskLogSink)(nil)
+)
+
+func TestMemSinkReadRemoveRetain(t *testing.T) {
+	ctx := context.Background()
+	sink := tempo.NewMemTaskLogSink()
+	a, b := uuid.New(), uuid.New()
+	mustAppend(t, sink, ctx, a, "INFO", "a1")
+	mustAppend(t, sink, ctx, b, "INFO", "b1")
+
+	got, err := sink.Logs(ctx, a)
+	if err != nil || len(got) != 1 || got[0].Message != "a1" {
+		t.Fatalf("Logs(a) = %+v, %v", got, err)
+	}
+
+	if err := sink.RemoveTasks(ctx, []uuid.UUID{a}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := sink.Logs(ctx, a); got != nil {
+		t.Fatalf("after RemoveTasks, Logs(a) = %+v, want nil", got)
+	}
+
+	if err := sink.RetainOnly(ctx, []uuid.UUID{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := sink.Logs(ctx, b); got != nil {
+		t.Fatalf("after RetainOnly(none), Logs(b) = %+v, want nil", got)
+	}
+}
+
+func mustAppend(t *testing.T, s tempo.TaskLogSink, ctx context.Context, id uuid.UUID, lvl, msg string) {
+	t.Helper()
+	if err := s.Append(ctx, id, lvl, msg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestRunnerPerTaskLogIsolation runs several tasks at once, each logging a line
 // tagged with its own name, and asserts that every task's log bucket holds only
 // its own lines. It guards the task-ID-from-context plumbing (logs.go): a
@@ -26,8 +66,8 @@ func TestRunnerPerTaskLogIsolation(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: n, QueueSize: 2 * n, LogSink: sink})
 		for i := 0; i < n; i++ {
 			name := fmt.Sprintf("task-%d", i)
-			r.RegisterRaw(name, func(ctx context.Context, _ []byte) error {
-				tempo.Info(ctx, "hello from "+name)
+			r.RegisterRaw(name, func(_ context.Context, log *slog.Logger, _ []byte) error {
+				log.Info("hello from " + name)
 				time.Sleep(1 * time.Minute)
 				return nil
 			})
@@ -52,7 +92,11 @@ func TestRunnerPerTaskLogIsolation(t *testing.T) {
 
 		for id, name := range idToName {
 			var msgs []string
-			for _, e := range sink.Logs(id) {
+			entries, err := sink.Logs(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
 				msgs = append(msgs, e.Message)
 			}
 			// The runner adds "task started"/"task finished" around the handler's
@@ -68,6 +112,65 @@ func TestRunnerPerTaskLogIsolation(t *testing.T) {
 	})
 }
 
+// TestWithGroupEmptyIsNoop guards slog's Handler contract: "If the name is
+// empty, WithGroup returns the receiver." *slog.Logger.WithGroup already
+// special-cases the empty name before it ever reaches a Handler, so the
+// plain call below can't by itself expose a regression. To actually drive
+// sinkHandler.WithGroup("") once a real group is already set, the test goes
+// through Logger.Handler() to bypass that shortcut, mirroring the
+// task-handler-driven style of TestTaskLoggerRendersAttrs.
+func TestWithGroupEmptyIsNoop(t *testing.T) {
+	ctx := context.Background()
+	sink := tempo.NewMemTaskLogSink()
+	r, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 1, QueueSize: 10, Persistence: tempo.NewMemPersistence(),
+		LogSink: sink, LogLevel: slog.LevelInfo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.RegisterRaw("t", func(_ context.Context, log *slog.Logger, _ []byte) error {
+		// The exact call the empty-group contract describes.
+		log.WithGroup("").Info("plain", "k", 1)
+
+		// Bypass *slog.Logger's own empty-name shortcut by grabbing the raw
+		// Handler, so an empty WithGroup after a real one ("g") is forced
+		// through sinkHandler.WithGroup itself.
+		h := log.Handler().WithGroup("g").WithGroup("")
+		slog.New(h).Info("grouped", "k", 2)
+		return nil
+	})
+	r.StartBg()
+	id, err := r.AddRaw("t", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, r, id)
+	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_ = r.ShutDown(sctx)
+
+	entries, _ := sink.Logs(ctx, id)
+	var gotPlain, gotGrouped bool
+	for _, e := range entries {
+		if strings.Contains(e.Message, "..") {
+			t.Errorf("message has a doubled group dot: %q", e.Message)
+		}
+		switch e.Message {
+		case "plain k=1":
+			gotPlain = true
+		case "grouped g.k=2":
+			gotGrouped = true
+		}
+	}
+	if !gotPlain {
+		t.Errorf("rendered line %q not found in %+v", "plain k=1", entries)
+	}
+	if !gotGrouped {
+		t.Errorf("rendered line %q not found in %+v", "grouped g.k=2", entries)
+	}
+}
+
 // TestRunnerLogLevelFiltering guards LogLevel: a handler log below the
 // configured level must not reach the sink, while one at or above it must. The
 // examples only ever configure LevelInfo, so the filtering path itself is
@@ -81,9 +184,9 @@ func TestRunnerLogLevelFiltering(t *testing.T) {
 			LogSink:     sink,
 			LogLevel:    slog.LevelWarn,
 		})
-		r.RegisterRaw("x", func(ctx context.Context, _ []byte) error {
-			tempo.Info(ctx, "info-should-be-dropped")
-			tempo.Warn(ctx, "warn-should-be-kept")
+		r.RegisterRaw("x", func(_ context.Context, log *slog.Logger, _ []byte) error {
+			log.Info("info-should-be-dropped")
+			log.Warn("warn-should-be-kept")
 			return nil
 		})
 		r.StartBg()
@@ -97,7 +200,11 @@ func TestRunnerLogLevelFiltering(t *testing.T) {
 		}
 
 		var gotInfo, gotWarn bool
-		for _, e := range sink.Logs(id) {
+		entries, err := sink.Logs(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
 			switch e.Message {
 			case "info-should-be-dropped":
 				gotInfo = true

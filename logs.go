@@ -18,77 +18,86 @@ type TaskLogSink interface {
 	Append(ctx context.Context, taskID uuid.UUID, level string, msg string) error
 }
 
-// used to isolate they keys used in the context data
-type taskIDCtxKey struct{}
-type taskLoggerCtxKey struct{}
+// TaskLogReader reads a task's log lines back. Optional: a sink implements it
+// when its logs are retrievable (e.g. for a UI). Mirrors the way
+// RecoverablePersistence optionally extends TaskStatePersistence.
+type TaskLogReader interface {
+	Logs(ctx context.Context, taskID uuid.UUID) ([]LogEntry, error)
+}
 
-var (
-	taskIDKey     = taskIDCtxKey{}
-	taskLoggerKey = taskLoggerCtxKey{}
-)
+// TaskLogCleaner lets the runner reap a sink's logs. Optional.
+//
+//	RemoveTasks — steady-state trim: called with the ids CleanHistory just removed.
+//	RetainOnly  — startup reconciliation: delete every task's logs except keep.
+type TaskLogCleaner interface {
+	RemoveTasks(ctx context.Context, ids []uuid.UUID) error
+	RetainOnly(ctx context.Context, keep []uuid.UUID) error
+}
 
 type sinkHandler struct {
 	sink     TaskLogSink
 	minLevel slog.Level
+	taskID   uuid.UUID
+	attrs    []slog.Attr // accumulated via WithAttrs, already group-qualified
+	group    string      // dotted prefix from WithGroup
 }
 
-// NewSinkHandler returns a slog.Handler that forwards records to the sink using the task ID from context.
-// Only records with level >= minLevel are sent. Use slog.LevelInfo (default 0) for info and above.
-func NewSinkHandler(sink TaskLogSink, minLevel slog.Level) slog.Handler {
-	return &sinkHandler{sink: sink, minLevel: minLevel}
+// newSinkHandler returns a slog.Handler bound to one task id; each record is
+// forwarded to the sink. Only records with level >= minLevel are sent.
+func newSinkHandler(sink TaskLogSink, minLevel slog.Level, taskID uuid.UUID) slog.Handler {
+	return &sinkHandler{sink: sink, minLevel: minLevel, taskID: taskID}
 }
 
-func (h *sinkHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func (h *sinkHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.minLevel
 }
 
+// Handle renders the message and its attrs as a single flat "key=value"
+// string, group-qualified with dots. Inline slog.Group(...) values are NOT
+// flattened and slog.LogValuer values are NOT resolved — both render as-is
+// via Value.String().
 func (h *sinkHandler) Handle(ctx context.Context, r slog.Record) error {
-	id, ok := ctx.Value(taskIDKey).(uuid.UUID)
-	if !ok {
-		return nil
+	msg := r.Message
+	for _, a := range h.attrs {
+		msg += " " + a.Key + "=" + a.Value.String()
 	}
-	return h.sink.Append(ctx, id, r.Level.String(), r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		key := a.Key
+		if h.group != "" {
+			key = h.group + "." + key
+		}
+		msg += " " + key + "=" + a.Value.String()
+		return true
+	})
+	return h.sink.Append(ctx, h.taskID, r.Level.String(), msg)
 }
 
 func (h *sinkHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return h
+	nh := *h
+	nh.attrs = append([]slog.Attr(nil), h.attrs...)
+	for _, a := range attrs {
+		if h.group != "" {
+			a.Key = h.group + "." + a.Key
+		}
+		nh.attrs = append(nh.attrs, a)
+	}
+	return &nh
 }
 
 func (h *sinkHandler) WithGroup(name string) slog.Handler {
-	return h
-}
-
-// Logger returns the task-scoped logger from ctx if set (when running under a runner with LogSink).
-// Otherwise returns a discard logger so nothing is logged. Use the Context methods or the level
-// wrappers (Debug, Info, Warn, Error) so logs are associated with the task.
-func Logger(ctx context.Context) *slog.Logger {
-	if l, ok := ctx.Value(taskLoggerKey).(*slog.Logger); ok && l != nil {
-		return l
+	if name == "" {
+		return h
 	}
-	return discardLogger
+	nh := *h
+	if h.group == "" {
+		nh.group = name
+	} else {
+		nh.group = h.group + "." + name
+	}
+	return &nh
 }
 
-// Debug logs at DEBUG. Pass ctx so the log is associated with the current task when LogSink is set.
-func Debug(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).DebugContext(ctx, msg, args...)
-}
-
-// Info logs at INFO. Pass ctx so the log is associated with the current task when LogSink is set.
-func Info(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).InfoContext(ctx, msg, args...)
-}
-
-// Warn logs at WARN. Pass ctx so the log is associated with the current task when LogSink is set.
-func Warn(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).WarnContext(ctx, msg, args...)
-}
-
-// Error logs at ERROR. Pass ctx so the log is associated with the current task when LogSink is set.
-func Error(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).ErrorContext(ctx, msg, args...)
-}
-
-// discardLogger is used when no task-scoped logger is in context; it drops all log output.
+// discardLogger backs a task whose runner has no LogSink configured.
 var discardLogger = slog.New(&discardHandler{})
 
 type discardHandler struct{}
@@ -124,9 +133,44 @@ func (m *MemTaskLogSink) Append(ctx context.Context, taskID uuid.UUID, level str
 	return nil
 }
 
-// Logs returns log entries for the given task ID, in order. Nil if none.
-func (m *MemTaskLogSink) Logs(taskID uuid.UUID) []LogEntry {
+// Logs implements TaskLogReader. Returns nil for an unknown id.
+func (m *MemTaskLogSink) Logs(_ context.Context, taskID uuid.UUID) ([]LogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]LogEntry(nil), m.entries[taskID]...)
+	if len(m.entries[taskID]) == 0 {
+		return nil, nil
+	}
+	return append([]LogEntry(nil), m.entries[taskID]...), nil
 }
+
+// RemoveTasks implements TaskLogCleaner.
+func (m *MemTaskLogSink) RemoveTasks(_ context.Context, ids []uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range ids {
+		delete(m.entries, id)
+	}
+	return nil
+}
+
+// RetainOnly implements TaskLogCleaner: drops every task's logs except keep.
+func (m *MemTaskLogSink) RetainOnly(_ context.Context, keep []uuid.UUID) error {
+	keepSet := make(map[uuid.UUID]struct{}, len(keep))
+	for _, id := range keep {
+		keepSet[id] = struct{}{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id := range m.entries {
+		if _, ok := keepSet[id]; !ok {
+			delete(m.entries, id)
+		}
+	}
+	return nil
+}
+
+var (
+	_ TaskLogSink    = (*MemTaskLogSink)(nil)
+	_ TaskLogReader  = (*MemTaskLogSink)(nil)
+	_ TaskLogCleaner = (*MemTaskLogSink)(nil)
+)

@@ -2,12 +2,13 @@ package tempo
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 )
 
 // registered is the internal, erased form of a task handler stored in the registry.
 type registered struct {
-	run            func(ctx context.Context, params []byte) error
+	run            func(ctx context.Context, log *slog.Logger, params []byte) error
 	maxParallelism int
 }
 
