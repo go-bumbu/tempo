@@ -66,8 +66,8 @@ func TestRunnerPerTaskLogIsolation(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: n, QueueSize: 2 * n, LogSink: sink})
 		for i := 0; i < n; i++ {
 			name := fmt.Sprintf("task-%d", i)
-			r.RegisterRaw(name, func(ctx context.Context, _ []byte) error {
-				tempo.Info(ctx, "hello from "+name)
+			r.RegisterRaw(name, func(_ context.Context, log *slog.Logger, _ []byte) error {
+				log.Info("hello from " + name)
 				time.Sleep(1 * time.Minute)
 				return nil
 			})
@@ -125,9 +125,9 @@ func TestRunnerLogLevelFiltering(t *testing.T) {
 			LogSink:     sink,
 			LogLevel:    slog.LevelWarn,
 		})
-		r.RegisterRaw("x", func(ctx context.Context, _ []byte) error {
-			tempo.Info(ctx, "info-should-be-dropped")
-			tempo.Warn(ctx, "warn-should-be-kept")
+		r.RegisterRaw("x", func(_ context.Context, log *slog.Logger, _ []byte) error {
+			log.Info("info-should-be-dropped")
+			log.Warn("warn-should-be-kept")
 			return nil
 		})
 		r.StartBg()

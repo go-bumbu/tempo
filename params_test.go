@@ -2,6 +2,7 @@ package tempo_test
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -15,7 +16,7 @@ func TestRegisterRawReceivesParams(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		got := make(chan []byte, 1)
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		r.RegisterRaw("scan", func(ctx context.Context, params []byte) error {
+		r.RegisterRaw("scan", func(ctx context.Context, _ *slog.Logger, params []byte) error {
 			got <- params
 			return nil
 		})
@@ -43,7 +44,7 @@ func TestRegisterRawReceivesParams(t *testing.T) {
 func TestRegisterRawMaxParallelism(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 3, QueueSize: 10})
-		r.RegisterRaw("scan", func(ctx context.Context, _ []byte) error {
+		r.RegisterRaw("scan", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
 			time.Sleep(10 * time.Minute)
 			return nil
 		}, tempo.WithMaxParallelism(1))
@@ -80,8 +81,8 @@ func TestRegisterRawOverwriteWins(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ran := make(chan string, 1)
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		r.RegisterRaw("x", func(ctx context.Context, _ []byte) error { ran <- "first"; return nil })
-		r.RegisterRaw("x", func(ctx context.Context, _ []byte) error { ran <- "second"; return nil })
+		r.RegisterRaw("x", func(ctx context.Context, _ *slog.Logger, _ []byte) error { ran <- "first"; return nil })
+		r.RegisterRaw("x", func(ctx context.Context, _ *slog.Logger, _ []byte) error { ran <- "second"; return nil })
 		r.StartBg()
 		if _, err := r.AddRaw("x", nil); err != nil {
 			t.Fatal(err)
@@ -125,7 +126,7 @@ func TestEnqueueTypedRoundTrip(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		got := make(chan scanParams, 1)
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		tempo.Register(r, "scan", func(ctx context.Context, p scanParams) error {
+		tempo.Register(r, "scan", func(ctx context.Context, _ *slog.Logger, p scanParams) error {
 			got <- p
 			return nil
 		})
@@ -152,7 +153,7 @@ func TestRegisterTypedEmptyParams(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		got := make(chan scanParams, 1)
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		tempo.Register(r, "scan", func(ctx context.Context, p scanParams) error {
+		tempo.Register(r, "scan", func(ctx context.Context, _ *slog.Logger, p scanParams) error {
 			got <- p
 			return nil
 		})
@@ -178,7 +179,7 @@ func TestRegisterTypedEmptyParams(t *testing.T) {
 func TestRegisterTypedMalformedFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
-		tempo.Register(r, "scan", func(ctx context.Context, p scanParams) error {
+		tempo.Register(r, "scan", func(ctx context.Context, _ *slog.Logger, p scanParams) error {
 			return nil
 		})
 		r.StartBg()
@@ -248,7 +249,7 @@ func TestEnqueueTypedRecovered(t *testing.T) {
 		// Runner 2: recovers the waiting task from the same persistence and runs it.
 		got := make(chan scanParams, 1)
 		r2 := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5, Persistence: persist})
-		tempo.Register(r2, "scan", func(ctx context.Context, p scanParams) error {
+		tempo.Register(r2, "scan", func(ctx context.Context, _ *slog.Logger, p scanParams) error {
 			got <- p
 			return nil
 		})

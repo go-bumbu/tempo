@@ -34,77 +34,63 @@ type TaskLogCleaner interface {
 	RetainOnly(ctx context.Context, keep []uuid.UUID) error
 }
 
-// used to isolate they keys used in the context data
-type taskIDCtxKey struct{}
-type taskLoggerCtxKey struct{}
-
-var (
-	taskIDKey     = taskIDCtxKey{}
-	taskLoggerKey = taskLoggerCtxKey{}
-)
-
 type sinkHandler struct {
 	sink     TaskLogSink
 	minLevel slog.Level
+	taskID   uuid.UUID
+	attrs    []slog.Attr // accumulated via WithAttrs, already group-qualified
+	group    string      // dotted prefix from WithGroup
 }
 
-// NewSinkHandler returns a slog.Handler that forwards records to the sink using the task ID from context.
-// Only records with level >= minLevel are sent. Use slog.LevelInfo (default 0) for info and above.
-func NewSinkHandler(sink TaskLogSink, minLevel slog.Level) slog.Handler {
-	return &sinkHandler{sink: sink, minLevel: minLevel}
+// newSinkHandler returns a slog.Handler bound to one task id; each record is
+// forwarded to the sink. Only records with level >= minLevel are sent.
+func newSinkHandler(sink TaskLogSink, minLevel slog.Level, taskID uuid.UUID) slog.Handler {
+	return &sinkHandler{sink: sink, minLevel: minLevel, taskID: taskID}
 }
 
-func (h *sinkHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func (h *sinkHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.minLevel
 }
 
 func (h *sinkHandler) Handle(ctx context.Context, r slog.Record) error {
-	id, ok := ctx.Value(taskIDKey).(uuid.UUID)
-	if !ok {
-		return nil
+	msg := r.Message
+	for _, a := range h.attrs {
+		msg += " " + a.Key + "=" + a.Value.String()
 	}
-	return h.sink.Append(ctx, id, r.Level.String(), r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		key := a.Key
+		if h.group != "" {
+			key = h.group + "." + key
+		}
+		msg += " " + key + "=" + a.Value.String()
+		return true
+	})
+	return h.sink.Append(ctx, h.taskID, r.Level.String(), msg)
 }
 
 func (h *sinkHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return h
+	nh := *h
+	nh.attrs = append([]slog.Attr(nil), h.attrs...)
+	for _, a := range attrs {
+		if h.group != "" {
+			a.Key = h.group + "." + a.Key
+		}
+		nh.attrs = append(nh.attrs, a)
+	}
+	return &nh
 }
 
 func (h *sinkHandler) WithGroup(name string) slog.Handler {
-	return h
-}
-
-// Logger returns the task-scoped logger from ctx if set (when running under a runner with LogSink).
-// Otherwise returns a discard logger so nothing is logged. Use the Context methods or the level
-// wrappers (Debug, Info, Warn, Error) so logs are associated with the task.
-func Logger(ctx context.Context) *slog.Logger {
-	if l, ok := ctx.Value(taskLoggerKey).(*slog.Logger); ok && l != nil {
-		return l
+	nh := *h
+	if h.group == "" {
+		nh.group = name
+	} else {
+		nh.group = h.group + "." + name
 	}
-	return discardLogger
+	return &nh
 }
 
-// Debug logs at DEBUG. Pass ctx so the log is associated with the current task when LogSink is set.
-func Debug(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).DebugContext(ctx, msg, args...)
-}
-
-// Info logs at INFO. Pass ctx so the log is associated with the current task when LogSink is set.
-func Info(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).InfoContext(ctx, msg, args...)
-}
-
-// Warn logs at WARN. Pass ctx so the log is associated with the current task when LogSink is set.
-func Warn(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).WarnContext(ctx, msg, args...)
-}
-
-// Error logs at ERROR. Pass ctx so the log is associated with the current task when LogSink is set.
-func Error(ctx context.Context, msg string, args ...any) {
-	Logger(ctx).ErrorContext(ctx, msg, args...)
-}
-
-// discardLogger is used when no task-scoped logger is in context; it drops all log output.
+// discardLogger backs a task whose runner has no LogSink configured.
 var discardLogger = slog.New(&discardHandler{})
 
 type discardHandler struct{}
