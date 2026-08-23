@@ -267,3 +267,105 @@ func TestEnqueueTypedRecovered(t *testing.T) {
 		}
 	})
 }
+
+func TestWithSingletonCoalescesRaw(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 10})
+		r.RegisterRaw("scan", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+			time.Sleep(10 * time.Minute)
+			return nil
+		}, tempo.WithSingleton())
+		r.StartBg()
+
+		ids := make([]uuid.UUID, 3)
+		for i := range ids {
+			id, err := r.AddRaw("scan", nil)
+			if err != nil {
+				t.Fatalf("AddRaw %d: %v", i, err)
+			}
+			ids[i] = id
+		}
+		time.Sleep(1 * time.Minute) // let the worker claim the first
+		synctest.Wait()
+
+		for i := 1; i < len(ids); i++ {
+			if ids[i] != ids[0] {
+				t.Errorf("enqueue %d: got id %v want %v (coalesced)", i, ids[i], ids[0])
+			}
+		}
+		tasks := r.List()
+		if len(tasks) != 1 {
+			t.Fatalf("task count: got %d want 1", len(tasks))
+		}
+		if tasks[0].Status != tempo.TaskStatusRunning {
+			t.Errorf("status: got %s want running", tasks[0].Status.Str())
+		}
+
+		go func() {
+			time.Sleep(2000 * time.Minute)
+			_ = r.ShutDown(context.Background())
+		}()
+		r.Wait()
+	})
+}
+
+func TestWithSingletonReleasesAfterTerminal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 10})
+		r.RegisterRaw("scan", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+			return nil // completes immediately
+		}, tempo.WithSingleton())
+		r.StartBg()
+
+		id1, err := r.AddRaw("scan", nil)
+		if err != nil {
+			t.Fatalf("AddRaw 1: %v", err)
+		}
+		time.Sleep(1 * time.Minute) // let it run to completion
+		synctest.Wait()
+
+		id2, err := r.AddRaw("scan", nil)
+		if err != nil {
+			t.Fatalf("AddRaw 2: %v", err)
+		}
+		if id2 == id1 {
+			t.Errorf("after completion expected a new task id, got the same %v", id1)
+		}
+
+		go func() {
+			time.Sleep(2000 * time.Minute)
+			_ = r.ShutDown(context.Background())
+		}()
+		r.Wait()
+	})
+}
+
+func TestWithSingletonCoalescesTyped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 10})
+		// Different params on purpose: v1 dedups by task name, not by payload.
+		tempo.Register(r, "scan", func(ctx context.Context, _ *slog.Logger, _ scanParams) error {
+			time.Sleep(10 * time.Minute)
+			return nil
+		}, tempo.WithSingleton())
+		r.StartBg()
+
+		id1, err := tempo.Enqueue(r, "scan", scanParams{Mode: "full"})
+		if err != nil {
+			t.Fatalf("Enqueue 1: %v", err)
+		}
+		id2, err := tempo.Enqueue(r, "scan", scanParams{Mode: "normal"})
+		if err != nil {
+			t.Fatalf("Enqueue 2: %v", err)
+		}
+		if id2 != id1 {
+			t.Errorf("typed singleton should coalesce: got %v want %v", id2, id1)
+		}
+
+		go func() {
+			time.Sleep(2000 * time.Minute)
+			_ = r.ShutDown(context.Background())
+		}()
+		r.Wait()
+	})
+}

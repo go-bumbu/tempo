@@ -14,12 +14,23 @@ type TaskOption func(*taskOpts)
 
 type taskOpts struct {
 	maxParallelism int
+	singleton      bool
 }
 
 // WithMaxParallelism caps how many instances of this task name run at once.
 // 0 (the default) means no per-task limit (use the runner default).
 func WithMaxParallelism(n int) TaskOption {
 	return func(o *taskOpts) { o.maxParallelism = n }
+}
+
+// WithSingleton makes a task coalesce on enqueue: while an instance of this task
+// name is already waiting or running, enqueuing it again enqueues nothing and
+// returns the in-flight task's id. Unlike WithMaxParallelism(1) — which lets
+// duplicates pile up as waiting and only serializes their execution —
+// WithSingleton keeps at most one instance in the queue at all. Dedup is by task
+// name, within a single process.
+func WithSingleton() TaskOption {
+	return func(o *taskOpts) { o.singleton = true }
 }
 
 func applyTaskOpts(opts []TaskOption) taskOpts {
@@ -38,7 +49,18 @@ func applyTaskOpts(opts []TaskOption) taskOpts {
 // they receive.
 func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, log *slog.Logger, params []byte) error, opts ...TaskOption) {
 	o := applyTaskOpts(opts)
-	r.registry.add(name, registered{run: fn, maxParallelism: o.maxParallelism})
+	r.registry.add(name, registered{run: fn, maxParallelism: o.maxParallelism, singleton: o.singleton})
+}
+
+// enqueue routes name onto the queue, honouring a singleton registration: a task
+// registered WithSingleton is added via the queue's AddUnique so a duplicate
+// coalesces onto the instance already waiting or running. Unknown or
+// non-singleton names use the unconditional Add.
+func (r *QueueRunner) enqueue(name string, params []byte) (uuid.UUID, error) {
+	if entry, ok := r.registry.lookup(name); ok && entry.singleton {
+		return r.queue.AddUnique(name, params)
+	}
+	return r.queue.Add(name, params)
 }
 
 // AddRaw enqueues a task by name with a raw parameter payload (may be nil).
@@ -46,7 +68,7 @@ func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, log 
 // to AddRaw after the call, and raw handlers must not mutate the params slice
 // they receive.
 func (r *QueueRunner) AddRaw(name string, params []byte) (uuid.UUID, error) {
-	return r.queue.Add(name, params)
+	return r.enqueue(name, params)
 }
 
 // Register registers a typed task handler. Parameters are JSON-decoded into T
@@ -64,6 +86,7 @@ func Register[T any](r *QueueRunner, name string, fn func(ctx context.Context, l
 			return fn(ctx, log, p)
 		},
 		maxParallelism: o.maxParallelism,
+		singleton:      o.singleton,
 	})
 }
 
@@ -74,5 +97,5 @@ func Enqueue[T any](r *QueueRunner, name string, params T) (uuid.UUID, error) {
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("tempo: encode params for task %q: %w", name, err)
 	}
-	return r.queue.Add(name, raw)
+	return r.enqueue(name, raw)
 }
