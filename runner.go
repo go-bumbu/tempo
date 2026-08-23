@@ -19,8 +19,9 @@ type QueueRunner struct {
 	historySize  int
 	cleanupTimer time.Duration
 
-	logSink  TaskLogSink
-	logLevel slog.Level
+	logSink      TaskLogSink
+	progressSink TaskProgressSink
+	logLevel     slog.Level
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -52,6 +53,8 @@ type RunnerCfg struct {
 	LogSink TaskLogSink
 	// LogLevel is the minimum slog level sent to LogSink (e.g. slog.LevelInfo). Zero is Info.
 	LogLevel slog.Level
+	// ProgressSink, when set, receives task progress updates. Each task handler is given a Progress reporter to publish them.
+	ProgressSink TaskProgressSink
 }
 
 // NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterRaw or Register to add task definitions. cfg.Persistence must not be nil.
@@ -80,6 +83,7 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		historySize:  cfg.HistorySize,
 		cleanupTimer: cfg.CleanupTimer,
 		logSink:      cfg.LogSink,
+		progressSink: cfg.ProgressSink,
 		logLevel:     cfg.LogLevel,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -89,12 +93,15 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		runningCount: make(map[string]int),
 	}
 
+	list, _ := queue.List(context.Background())
+	ids := make([]uuid.UUID, 0, len(list))
+	for _, info := range list {
+		ids = append(ids, info.ID)
+	}
 	if c, ok := cfg.LogSink.(TaskLogCleaner); ok {
-		list, _ := queue.List(context.Background())
-		ids := make([]uuid.UUID, 0, len(list))
-		for _, info := range list {
-			ids = append(ids, info.ID)
-		}
+		_ = c.RetainOnly(context.Background(), ids)
+	}
+	if c, ok := cfg.ProgressSink.(TaskProgressCleaner); ok {
 		_ = c.RetainOnly(context.Background(), ids)
 	}
 	return r, nil
@@ -150,6 +157,12 @@ func (r *QueueRunner) StartBg() {
 				} else {
 					taskLog = discardLogger
 				}
+				var taskProg Progress
+				if r.progressSink != nil {
+					taskProg = newSinkReporter(r.progressSink, id)
+				} else {
+					taskProg = discardProgress
+				}
 				r.appendTaskLog(childCtx, id, "INFO", "task started")
 
 				var finalStatus TaskStatus
@@ -168,7 +181,7 @@ func (r *QueueRunner) StartBg() {
 							r.appendTaskLog(childCtx, id, "ERROR", fmt.Sprint(recVal))
 						}
 					}()
-					taskErr := entry.run(childCtx, taskLog, params)
+					taskErr := entry.run(childCtx, taskLog, taskProg, params)
 					finalEndedAt = time.Now()
 					if taskErr == nil {
 						finalStatus = TaskStatusComplete
@@ -235,13 +248,16 @@ func (r *QueueRunner) autoClean() {
 	}
 }
 
-// cleanupOnce trims task history and reaps the log files of the trimmed tasks.
+// cleanupOnce trims task history and reaps the log files and progress records of the trimmed tasks.
 func (r *QueueRunner) cleanupOnce(ctx context.Context) {
 	removed, _ := r.queue.CleanHistory(ctx, r.historySize)
 	if len(removed) == 0 {
 		return
 	}
 	if c, ok := r.logSink.(TaskLogCleaner); ok {
+		_ = c.RemoveTasks(ctx, removed)
+	}
+	if c, ok := r.progressSink.(TaskProgressCleaner); ok {
 		_ = c.RemoveTasks(ctx, removed)
 	}
 }

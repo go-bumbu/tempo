@@ -208,6 +208,50 @@ Because `filelog` files outlive the process, pair it with a
 With the default in-memory persistence, the startup sweep deletes every prior
 log file, since no task state remains to correlate them with.
 
+## Task progress
+
+Alongside the logger, each task handler receives a `tempo.Progress` reporter as
+its third argument. A long job publishes how far along it is; the reporter is a
+no-op when no `ProgressSink` is configured, so it is always safe to call:
+
+```go
+r.RegisterRaw("scan", func(ctx context.Context, log *slog.Logger, prog tempo.Progress, params []byte) error {
+    files := load(params)
+    prog.SetTotal(int64(len(files)))
+    for _, f := range files {
+        scan(f)
+        prog.SetStage("scanning " + f)
+        prog.Inc(1)
+    }
+    return nil
+})
+```
+
+Configure a sink with `RunnerCfg.ProgressSink`. A sink implements
+`TaskProgressSink` (write — an upsert by task id). It may also implement
+`TaskProgressReader` (`Progress`) to read the latest state back, and
+`TaskProgressCleaner` (`RemoveTasks` / `RetainOnly`) so the runner can reap it —
+the same optional-interface pattern the log sinks use. The built-in
+`tempo.MemTaskProgressSink` implements all three.
+
+Progress is last-value-wins state, not a log stream: `ProgressState` holds
+`Done` / `Total` / `Stage`, and `%` and ETA are computed from it, never stored:
+
+```go
+p, ok, _ := sink.Progress(ctx, id)
+if ok {
+    pct, _ := p.Percent()            // Done/Total in [0,1]
+    info, _ := runner.GetTask(id)
+    eta, _ := p.ETA(info.StartedAt)  // linear estimate
+    fmt.Printf("%.0f%% (%d/%d) — %s, ~%s left\n", pct*100, p.Done, p.Total, p.Stage, eta)
+}
+```
+
+Retention follows task existence, like logs: progress is reaped when its task is
+trimmed from history, and orphans are swept at startup. A job that updates in a
+tight loop should report every so often (e.g. every N iterations) rather than on
+every one, since `Set` runs synchronously on the worker.
+
 ## How To
 
 ### Handle Shutdown in Long-Running Tasks

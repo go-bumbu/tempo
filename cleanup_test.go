@@ -102,3 +102,71 @@ func TestCleanupOnceForwardsRemovedIDs(t *testing.T) {
 		t.Fatalf("removed = %v, want [%v %v]", fc.removed, a, b)
 	}
 }
+
+// fakeProgressCleaner is a TaskProgressSink that also records cleanup calls.
+type fakeProgressCleaner struct {
+	set      int
+	removed  []uuid.UUID
+	retained [][]uuid.UUID
+}
+
+func (f *fakeProgressCleaner) Set(context.Context, uuid.UUID, ProgressState) error {
+	f.set++
+	return nil
+}
+func (f *fakeProgressCleaner) RemoveTasks(_ context.Context, ids []uuid.UUID) error {
+	f.removed = append(f.removed, ids...)
+	return nil
+}
+func (f *fakeProgressCleaner) RetainOnly(_ context.Context, keep []uuid.UUID) error {
+	f.retained = append(f.retained, keep)
+	return nil
+}
+
+func TestProgressRetainOnlyAtConstruction(t *testing.T) {
+	a, b := uuid.New(), uuid.New()
+	fpc := &fakeProgressCleaner{}
+	_, err := NewQueueRunner(RunnerCfg{
+		QueueSize: 10, HistorySize: 10,
+		Persistence:  &fakeRecoverable{list: []TaskInfo{term(a), term(b)}},
+		ProgressSink: fpc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fpc.retained) != 1 || len(fpc.retained[0]) != 2 {
+		t.Fatalf("RetainOnly calls = %v, want one call keeping 2 ids", fpc.retained)
+	}
+}
+
+func TestProgressRetainOnlyEmptyUnderMemPersistence(t *testing.T) {
+	fpc := &fakeProgressCleaner{}
+	_, err := NewQueueRunner(RunnerCfg{
+		QueueSize: 10, HistorySize: 10,
+		Persistence:  NewMemPersistence(),
+		ProgressSink: fpc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fpc.retained) != 1 || len(fpc.retained[0]) != 0 {
+		t.Fatalf("RetainOnly calls = %v, want one call keeping 0 ids", fpc.retained)
+	}
+}
+
+func TestProgressCleanupOnceForwardsRemovedIDs(t *testing.T) {
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	fpc := &fakeProgressCleaner{}
+	r, err := NewQueueRunner(RunnerCfg{
+		QueueSize: 10, HistorySize: 1, // keep 1 of 3 terminal -> remove 2
+		Persistence:  &fakeRecoverable{list: []TaskInfo{term(a), term(b), term(c)}},
+		ProgressSink: fpc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.cleanupOnce(context.Background())
+	if len(fpc.removed) != 2 || fpc.removed[0] != a || fpc.removed[1] != b {
+		t.Fatalf("removed = %v, want [%v %v]", fpc.removed, a, b)
+	}
+}

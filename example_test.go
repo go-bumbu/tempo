@@ -38,7 +38,7 @@ func ExampleQueueRunner() {
 	for i := range 5 {
 		name := fmt.Sprintf(taskNameFmt, i)
 		n := name
-		qrun.RegisterRaw(name, func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+		qrun.RegisterRaw(name, func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, _ []byte) error {
 			fmt.Printf("Executing task: %s\n", n)
 			return nil
 		})
@@ -91,7 +91,7 @@ func ExampleMemTaskLogSink() {
 	}
 
 	const LoggedTask = "logged_task"
-	qrun.RegisterRaw(LoggedTask, func(_ context.Context, log *slog.Logger, _ []byte) error {
+	qrun.RegisterRaw(LoggedTask, func(_ context.Context, log *slog.Logger, _ tempo.Progress, _ []byte) error {
 		// "task started" and "task finished" are logged automatically by the runner
 		log.Info("step 1 done")
 		log.Warn("optional step skipped")
@@ -154,8 +154,12 @@ func ExampleQueueRunner_runHttpServer() {
 		Server1 = "server1"
 		Server2 = "server2"
 	)
-	q.RegisterRaw(Server1, func(ctx context.Context, _ *slog.Logger, _ []byte) error { return httpServer(ctx, port1) })
-	q.RegisterRaw(Server2, func(ctx context.Context, _ *slog.Logger, _ []byte) error { return httpServer(ctx, port2) })
+	q.RegisterRaw(Server1, func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, _ []byte) error {
+		return httpServer(ctx, port1)
+	})
+	q.RegisterRaw(Server2, func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, _ []byte) error {
+		return httpServer(ctx, port2)
+	})
 
 	q.StartBg()
 
@@ -243,7 +247,7 @@ func ExampleQueueRunner_perTaskParallelism() {
 	)
 
 	// "scan" may run only one at a time; each scan takes ~150ms.
-	tempo.Register(runner, Scan, func(ctx context.Context, _ *slog.Logger, p ScanParams) error {
+	tempo.Register(runner, Scan, func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, p ScanParams) error {
 		defer wg.Done()
 		time.Sleep(150 * time.Millisecond)
 		fmt.Printf("scan: %s\n", p.Mode)
@@ -251,7 +255,7 @@ func ExampleQueueRunner_perTaskParallelism() {
 	}, tempo.WithMaxParallelism(1))
 
 	// "generate-thumb" may run up to three at once; each does short, quick work.
-	tempo.Register(runner, GenerateThumb, func(ctx context.Context, _ *slog.Logger, p ThumbParams) error {
+	tempo.Register(runner, GenerateThumb, func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, p ThumbParams) error {
 		defer wg.Done()
 		time.Sleep(time.Duration(p.WorkMS) * time.Millisecond)
 		fmt.Printf("thumb: %s\n", p.ImageID)
@@ -409,7 +413,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		panic(err)
 	}
 	const Work = "work"
-	runner.RegisterRaw(Work, func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+	runner.RegisterRaw(Work, func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, _ []byte) error {
 		time.Sleep(2 * time.Millisecond)
 		return nil
 	})
@@ -454,7 +458,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 	if err != nil {
 		panic(err)
 	}
-	runner2.RegisterRaw(Work, func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+	runner2.RegisterRaw(Work, func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, _ []byte) error {
 		time.Sleep(2 * time.Millisecond)
 		return nil
 	})

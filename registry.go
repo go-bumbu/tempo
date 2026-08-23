@@ -8,7 +8,7 @@ import (
 
 // registered is the internal, erased form of a task handler stored in the registry.
 type registered struct {
-	run            func(ctx context.Context, log *slog.Logger, params []byte) error
+	run            func(ctx context.Context, log *slog.Logger, prog Progress, params []byte) error
 	maxParallelism int
 	singleton      bool
 }
