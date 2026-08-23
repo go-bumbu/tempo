@@ -159,7 +159,7 @@ store, err := dbschedule.New(db) // AutoMigrates the tempo_schedules table
 A fire that cannot be enqueued — a full queue, an unregistered task name — is
 logged and dropped. Fires missed while the process was down are not replayed,
 and a fire is enqueued even if the previous run is still going. Register the
-task `tempo.WithMaxParallelism(1)` to serialize runs (a new fire still queues
+task with `tempo.WithMaxParallelism(1)` to serialize runs (a new fire still queues
 behind the current one), or `tempo.WithSingleton()` to skip the fire entirely
 while a previous run is still waiting or running.
 
