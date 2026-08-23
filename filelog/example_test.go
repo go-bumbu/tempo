@@ -29,7 +29,7 @@ func ExampleStore() {
 		return nil
 	})
 	r.StartBg()
-	id, _ := r.AddRaw("greet", nil)
+	id, _, _ := r.AddRaw("greet", nil)
 
 	time.Sleep(100 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

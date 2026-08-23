@@ -270,11 +270,11 @@ type recordingEnqueuer struct {
 	calls []string
 }
 
-func (r *recordingEnqueuer) AddRaw(name string, params []byte) (uuid.UUID, error) {
+func (r *recordingEnqueuer) AddRaw(name string, params []byte) (uuid.UUID, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, name+" "+string(params))
-	return uuid.New(), nil
+	return uuid.New(), false, nil
 }
 
 func (r *recordingEnqueuer) snapshot() []string {

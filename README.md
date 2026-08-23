@@ -41,12 +41,12 @@ tempo.Register(runner, "scan", func(ctx context.Context, log *slog.Logger, p Sca
 runner.StartBg()
 
 // enqueue with typed params
-if _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
+if _, _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
     panic(err)
 }
 
 // or enqueue by name with a raw JSON payload (e.g. from an HTTP handler)
-if _, err := runner.AddRaw("scan", []byte(`{"mode":"normal"}`)); err != nil {
+if _, _, err := runner.AddRaw("scan", []byte(`{"mode":"normal"}`)); err != nil {
     panic(err)
 }
 
@@ -87,6 +87,33 @@ On startup the runner reloads persisted tasks: a task still **waiting** when the
 process died resumes and runs, while one caught **running** is reconciled to
 **failed** — no worker owns it, and re-running could repeat side effects. The
 in-memory persistence has no `List`, so it recovers nothing.
+
+## Singleton tasks
+
+Register a task with `tempo.WithSingleton()` to keep at most one instance of it
+in the queue. While an instance is **waiting or running**, enqueuing that task
+again — via `Enqueue`, `AddRaw`, or a schedule fire — adds nothing and returns
+`(that task's id, true, nil)`; once it reaches a terminal state, the next
+enqueue starts a fresh one and returns `(new id, false, nil)`. The `coalesced`
+bool lets a caller tell a coalesced duplicate from a fresh enqueue; `error`
+stays reserved for genuine failures such as `ErrQueueFull`.
+
+```go
+tempo.Register(runner, "reindex", reindex, tempo.WithSingleton())
+
+id, coalesced, err := runner.AddRaw("reindex", nil)
+if err != nil {
+    panic(err) // real failure, e.g. ErrQueueFull
+}
+if coalesced {
+    fmt.Printf("reindex already queued or running as %s\n", id)
+}
+```
+
+This differs from `WithMaxParallelism(1)`: that lets duplicates pile up as
+waiting and only serializes their execution, whereas `WithSingleton` never
+queues a duplicate in the first place. Dedup is by **task name** and within a
+single process; it does not coordinate across processes sharing a database.
 
 ## Scheduling
 
@@ -141,8 +168,10 @@ store, err := dbschedule.New(db) // AutoMigrates the tempo_schedules table
 
 A fire that cannot be enqueued — a full queue, an unregistered task name — is
 logged and dropped. Fires missed while the process was down are not replayed,
-and a fire is enqueued even if the previous run is still going; use
-`tempo.WithMaxParallelism(1)` to stop a task running concurrently with itself.
+and a fire is enqueued even if the previous run is still going. Register the
+task with `tempo.WithMaxParallelism(1)` to serialize runs (a new fire still queues
+behind the current one), or `tempo.WithSingleton()` to skip the fire entirely
+while a previous run is still waiting or running.
 
 ## Task logs
 

@@ -45,7 +45,7 @@ func TestTaskData(t *testing.T) {
 		})
 		r.StartBg()
 
-		_, err := r.AddRaw("some action", nil)
+		_, _, err := r.AddRaw("some action", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func TestRunnerParallelism(t *testing.T) {
 			r.StartBg()
 
 			for i := 1; i <= 4; i++ {
-				_, err := r.AddRaw(strconv.Itoa(i), nil)
+				_, _, err := r.AddRaw(strconv.Itoa(i), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -144,7 +144,7 @@ func TestRunnerParallelism(t *testing.T) {
 			r.StartBg()
 
 			for i := 1; i <= 12; i++ {
-				_, err := r.AddRaw(strconv.Itoa(i), nil)
+				_, _, err := r.AddRaw(strconv.Itoa(i), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -186,20 +186,20 @@ func TestRunnerLimit(t *testing.T) {
 		})
 		r.StartBg()
 
-		_, err := r.AddRaw("some action", nil)
+		_, _, err := r.AddRaw("some action", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(100 * time.Millisecond)
 
 		for i := 1; i <= 5; i++ {
-			_, err := r.AddRaw("some action", nil)
+			_, _, err := r.AddRaw("some action", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
 
-		_, err = r.AddRaw("some action", nil)
+		_, _, err = r.AddRaw("some action", nil)
 
 		if !errors.Is(err, tempo.ErrQueueFull) {
 			t.Errorf("expect err to be tempo.ErrQueueFull but got %v", err)
@@ -225,14 +225,14 @@ func TestRunnerHistoryClean(t *testing.T) {
 			r.StartBg()
 
 			for i := 1; i <= 10; i++ {
-				_, err := r.AddRaw("success", nil)
+				_, _, err := r.AddRaw("success", nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				time.Sleep(70 * time.Second)
 			}
 			for i := 1; i <= 5; i++ {
-				_, err := r.AddRaw("fail", nil)
+				_, _, err := r.AddRaw("fail", nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -274,14 +274,14 @@ func TestRunnerHistoryClean(t *testing.T) {
 			r.StartBg()
 
 			for i := 1; i <= 10; i++ {
-				_, err := r.AddRaw("success", nil)
+				_, _, err := r.AddRaw("success", nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				time.Sleep(70 * time.Second)
 			}
 			for i := 1; i <= 5; i++ {
-				_, err := r.AddRaw("fail", nil)
+				_, _, err := r.AddRaw("fail", nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -353,7 +353,7 @@ func TestRunnerShutdown(t *testing.T) {
 			r.StartBg()
 
 			for i := 1; i <= 2; i++ {
-				_, err := r.AddRaw(strconv.Itoa(i), nil)
+				_, _, err := r.AddRaw(strconv.Itoa(i), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -418,7 +418,7 @@ func TestRunnerShutdown(t *testing.T) {
 			r.StartBg()
 
 			for i := 1; i <= 2; i++ {
-				_, err := r.AddRaw(strconv.Itoa(i), nil)
+				_, _, err := r.AddRaw(strconv.Itoa(i), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -463,7 +463,7 @@ func TestRunnerRaceConditions(t *testing.T) {
 			r.StartBg()
 
 			for i := 1; i <= 4; i++ {
-				_, err := r.AddRaw("some action", nil)
+				_, _, err := r.AddRaw("some action", nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -550,7 +550,7 @@ func TestRunnerCancelRacesTaskRegistration(t *testing.T) {
 	})
 	r.StartBg()
 
-	id, err := r.AddRaw("blocked-start", nil)
+	id, _, err := r.AddRaw("blocked-start", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func TestRunnerCancelErrors(t *testing.T) {
 			r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
 			r.RegisterRaw("quick", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return nil })
 			r.StartBg()
-			id, err := r.AddRaw("quick", nil)
+			id, _, err := r.AddRaw("quick", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -646,7 +646,7 @@ func TestRunnerCatchPanic(t *testing.T) {
 		r.StartBg()
 
 		for i := 1; i <= 3; i++ {
-			_, err := r.AddRaw("some action", nil)
+			_, _, err := r.AddRaw("some action", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -692,12 +692,12 @@ func TestRunnerCancel(t *testing.T) {
 			r.RegisterRaw("waiting task", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return fn(ctx) })
 			r.StartBg()
 
-			_, err := r.AddRaw("running task", nil)
+			_, _, err := r.AddRaw("running task", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			id, err := r.AddRaw("waiting task", nil)
+			id, _, err := r.AddRaw("waiting task", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -761,7 +761,7 @@ func TestRunnerCancel(t *testing.T) {
 			r.RegisterRaw("timeout_fn", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return fn(ctx) })
 			r.StartBg()
 
-			id, err := r.AddRaw("timeout_fn", nil)
+			id, _, err := r.AddRaw("timeout_fn", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -836,7 +836,7 @@ func TestRunnerCancel(t *testing.T) {
 			r.RegisterRaw("timeout_fn", func(ctx context.Context, _ *slog.Logger, _ []byte) error { return fn(ctx) })
 			r.StartBg()
 
-			id, err := r.AddRaw("timeout_fn", nil)
+			id, _, err := r.AddRaw("timeout_fn", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -920,7 +920,7 @@ func TestTaskLoggerRendersAttrs(t *testing.T) {
 		return nil
 	})
 	r.StartBg()
-	id, err := r.AddRaw("t", nil)
+	id, _, err := r.AddRaw("t", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +956,7 @@ func TestLifecycleLoggedAboveJobLevel(t *testing.T) {
 		return nil
 	})
 	r.StartBg()
-	id, _ := r.AddRaw("t", nil)
+	id, _, _ := r.AddRaw("t", nil)
 	waitTerminal(t, r, id)
 	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()

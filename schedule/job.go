@@ -16,7 +16,9 @@ import (
 // A fire that cannot be enqueued (a full queue, an unregistered task name) is
 // logged and dropped. Returning the error is safe: go-quartz reschedules a job
 // before executing it and defaults to zero retries, so an error neither
-// unschedules the job nor causes a re-run.
+// unschedules the job nor causes a re-run. A fire that coalesces onto an
+// already waiting/running WithSingleton task is logged as a skip and dropped —
+// it is not re-enqueued.
 type enqueueJob struct {
 	schedID  uuid.UUID
 	taskName string
@@ -32,7 +34,7 @@ func (j *enqueueJob) Execute(_ context.Context) error {
 	// Clone: tempo does not copy the params slice, and this job hands the same
 	// bytes out on every fire. A handler that mutated them would corrupt every
 	// later run of this schedule.
-	taskID, err := j.enq.AddRaw(j.taskName, slices.Clone(j.params))
+	taskID, coalesced, err := j.enq.AddRaw(j.taskName, slices.Clone(j.params))
 	if err != nil {
 		j.log.Warn("schedule fire could not be enqueued",
 			slog.String("component", "tempo/schedule"),
@@ -40,6 +42,14 @@ func (j *enqueueJob) Execute(_ context.Context) error {
 			slog.String("task", j.taskName),
 			slog.String("error", err.Error()))
 		return err
+	}
+	if coalesced {
+		j.log.Info("schedule fire skipped: task already waiting or running",
+			slog.String("component", "tempo/schedule"),
+			slog.String("scheduleId", j.schedID.String()),
+			slog.String("task", j.taskName),
+			slog.String("taskId", taskID.String()))
+		return nil
 	}
 	j.log.Info("schedule fired",
 		slog.String("component", "tempo/schedule"),

@@ -10,6 +10,7 @@ import (
 type registered struct {
 	run            func(ctx context.Context, log *slog.Logger, params []byte) error
 	maxParallelism int
+	singleton      bool
 }
 
 // taskRegistry is the internal in-memory registry; only the runner uses lookup.

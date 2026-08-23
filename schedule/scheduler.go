@@ -439,7 +439,7 @@ func (s *Scheduler) Trigger(ctx context.Context, id uuid.UUID) (uuid.UUID, error
 	if err != nil {
 		return uuid.Nil, err
 	}
-	taskID, err := s.enq.AddRaw(sch.TaskName, slices.Clone([]byte(sch.Params)))
+	taskID, _, err := s.enq.AddRaw(sch.TaskName, slices.Clone([]byte(sch.Params)))
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("schedule: enqueue task %q: %w", sch.TaskName, err)
 	}
