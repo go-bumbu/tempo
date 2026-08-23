@@ -1,9 +1,12 @@
 package tempo
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestProgressStatePercent(t *testing.T) {
@@ -42,5 +45,41 @@ func TestProgressStateETA(t *testing.T) {
 	}
 	if _, ok := (ProgressState{Done: 5, Total: 100, UpdatedAt: start.Add(10 * time.Second)}).ETA(time.Time{}); ok {
 		t.Error("zero startedAt should give ok=false")
+	}
+}
+
+func TestMemProgressSinkRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemTaskProgressSink()
+	a, b := uuid.New(), uuid.New()
+
+	if err := s.Set(ctx, a, ProgressState{Done: 3, Total: 10, Stage: "x", UpdatedAt: time.Unix(1, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	// upsert: the second Set replaces the first
+	if err := s.Set(ctx, a, ProgressState{Done: 7, Total: 10, UpdatedAt: time.Unix(2, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Progress(ctx, a)
+	if err != nil || !ok || got.Done != 7 || got.Total != 10 {
+		t.Fatalf("Progress(a) = %+v, %v, %v; want Done=7 Total=10", got, ok, err)
+	}
+	if _, ok, _ := s.Progress(ctx, b); ok {
+		t.Fatal("unknown id should give ok=false")
+	}
+
+	if err := s.RemoveTasks(ctx, []uuid.UUID{a}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Progress(ctx, a); ok {
+		t.Fatal("after RemoveTasks, a should be gone")
+	}
+
+	_ = s.Set(ctx, b, ProgressState{Done: 1, Total: 2, UpdatedAt: time.Unix(3, 0)})
+	if err := s.RetainOnly(ctx, []uuid.UUID{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Progress(ctx, b); ok {
+		t.Fatal("after RetainOnly(none), b should be gone")
 	}
 }
