@@ -1,10 +1,12 @@
 package schedule
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -18,11 +20,13 @@ type enqueued struct {
 }
 
 // fakeEnqueuer records AddRaw calls and can be told to fail. Used by every test
-// in this package that needs an Enqueuer.
+// in this package that needs an Enqueuer. coalesce defaults to false, so every
+// existing test (which never sets it) keeps observing a fresh enqueue.
 type fakeEnqueuer struct {
-	mu    sync.Mutex
-	calls []enqueued
-	err   error
+	mu       sync.Mutex
+	calls    []enqueued
+	err      error
+	coalesce bool
 }
 
 func (f *fakeEnqueuer) AddRaw(name string, params []byte) (uuid.UUID, bool, error) {
@@ -32,7 +36,7 @@ func (f *fakeEnqueuer) AddRaw(name string, params []byte) (uuid.UUID, bool, erro
 		return uuid.Nil, false, f.err
 	}
 	f.calls = append(f.calls, enqueued{name: name, params: params})
-	return uuid.New(), false, nil
+	return uuid.New(), f.coalesce, nil
 }
 
 func (f *fakeEnqueuer) snapshot() []enqueued {
@@ -50,6 +54,14 @@ func (f *fakeEnqueuer) setErr(err error) {
 // quietLogger discards output so tests do not spam the console.
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// captureLogger is quietLogger's counterpart for tests that need to inspect
+// what was logged: same slog.NewTextHandler construction, but writing to a
+// buffer instead of discarding.
+func captureLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
 }
 
 func TestEnqueueJobExecute(t *testing.T) {
@@ -124,6 +136,46 @@ func TestEnqueueJobExecute(t *testing.T) {
 			t.Errorf("expected the enqueue error, got %v", err)
 		}
 	})
+}
+
+// TestEnqueueJobSkipsOnCoalesce guards the coalesce branch of Execute: a fire
+// that coalesces onto an already waiting/running WithSingleton task must be
+// logged as a skip and return nil, without also logging the normal "schedule
+// fired" line.
+func TestEnqueueJobSkipsOnCoalesce(t *testing.T) {
+	enq := &fakeEnqueuer{coalesce: true}
+	log, buf := captureLogger()
+	job := &enqueueJob{
+		schedID:  uuid.New(),
+		taskName: "scan",
+		params:   []byte(`{"full":true}`),
+		enq:      enq,
+		log:      log,
+	}
+
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "level=INFO") {
+		t.Errorf("expected an Info line, got log output:\n%s", out)
+	}
+	if !strings.Contains(out, `msg="schedule fire skipped: task already waiting or running"`) {
+		t.Errorf("expected the skip message, got log output:\n%s", out)
+	}
+	if !strings.Contains(out, "component=tempo/schedule") {
+		t.Errorf("expected the component field, got log output:\n%s", out)
+	}
+	if !strings.Contains(out, "scheduleId="+job.schedID.String()) {
+		t.Errorf("expected the scheduleId field, got log output:\n%s", out)
+	}
+	if !strings.Contains(out, "task=scan") {
+		t.Errorf("expected the task field, got log output:\n%s", out)
+	}
+	if strings.Contains(out, "schedule fired") {
+		t.Errorf("expected no \"schedule fired\" line on coalesce, got log output:\n%s", out)
+	}
 }
 
 func TestEnqueueJobDescription(t *testing.T) {

@@ -106,12 +106,15 @@ func TestRegisterRawOverwriteWins(t *testing.T) {
 func TestEnqueueMarshalError(t *testing.T) {
 	r := newTestRunner(tempo.RunnerCfg{Parallelism: 1, QueueSize: 5})
 	// A channel has no JSON representation.
-	id, _, err := tempo.Enqueue(r, "x", make(chan int))
+	id, coalesced, err := tempo.Enqueue(r, "x", make(chan int))
 	if err == nil {
 		t.Fatal("expected a marshal error")
 	}
 	if id != uuid.Nil {
 		t.Errorf("expected uuid.Nil on marshal error, got %v", id)
+	}
+	if coalesced {
+		t.Errorf("expected coalesced false on marshal error, got true")
 	}
 	if got := len(r.List()); got != 0 {
 		t.Errorf("expected nothing queued after a marshal error, got %d", got)
