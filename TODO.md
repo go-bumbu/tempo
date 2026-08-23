@@ -40,8 +40,6 @@ because todo only preserves free-form text there.)
   Gorm, out of core. `RecoverablePersistence` mirror of `dbschedule`; survives restart (waiting tasks resume, orphaned "running" → "failed" via core). Tested.
 - [x] per-job log files
   Readable + auto-cleaned → `tempo/filelog`; needs a core readable/cleanable sink iface (TaskLogSink is write-only today).
-- [ ] ready-made setup
-  One-step constructor (runner + persistence + logs). Job-list DTO for UIs already covered by `TaskInfo` + `Runner.List()`.
 
 ## Greenfield gaps — NOT in either app, decide if wanted
 
@@ -49,9 +47,4 @@ because todo only preserves free-form text there.)
   Re-run a failed task N times.
 - [ ] progress reporting
   Status only today, no %/step.
-- [ ] dedup / singleton enqueue
-
-## Keep OUT of tempo (separate lib)
-
-- [ ] HTTP resilience + parallel-map worker pool
-  Retry / rate-limit / API-key rotation. Duplicated in the apps, but not job-runner concerns.
+- [x] dedup / singleton enqueue
