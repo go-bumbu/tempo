@@ -248,7 +248,7 @@ func (r *QueueRunner) autoClean() {
 	}
 }
 
-// cleanupOnce trims task history and reaps the log files of the trimmed tasks.
+// cleanupOnce trims task history and reaps the log files and progress records of the trimmed tasks.
 func (r *QueueRunner) cleanupOnce(ctx context.Context) {
 	removed, _ := r.queue.CleanHistory(ctx, r.historySize)
 	if len(removed) == 0 {

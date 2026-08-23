@@ -140,6 +140,7 @@ var (
 // every task handler. It is safe to call from multiple goroutines, and it is a
 // no-op when the runner has no ProgressSink configured, so a job may always
 // call it.
+// Inc returns the new Done, but returns 0 under a runner with no ProgressSink (the reporter is a no-op) — do not use its return value for job control flow.
 type Progress interface {
 	SetTotal(total int64)
 	Set(done int64)

@@ -1009,7 +1009,7 @@ func TestTaskReporterReachesSink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitTerminal(t, r, id)
+	info := waitTerminal(t, r, id)
 	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	_ = r.ShutDown(sctx)
@@ -1020,6 +1020,9 @@ func TestTaskReporterReachesSink(t *testing.T) {
 	}
 	if pct, _ := got.Percent(); pct != 1 {
 		t.Fatalf("Percent = %v; want 1", pct)
+	}
+	if eta, ok := got.ETA(info.StartedAt); !ok || eta != 0 {
+		t.Fatalf("ETA(info.StartedAt) = %v, %v; want 0, true (task complete)", eta, ok)
 	}
 }
 
