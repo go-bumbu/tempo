@@ -86,6 +86,92 @@ func TestQueueAdd(t *testing.T) {
 	})
 }
 
+func TestQueueAddUnique(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("coalesces onto a waiting task", func(t *testing.T) {
+		tq := newTestQueue(10)
+		id1, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique 1: %v", err)
+		}
+		id2, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique 2: %v", err)
+		}
+		if id2 != id1 {
+			t.Errorf("second AddUnique: got id %v want %v (coalesced)", id2, id1)
+		}
+		list, _ := tq.List(ctx)
+		if len(list) != 1 {
+			t.Fatalf("task count: got %d want 1", len(list))
+		}
+	})
+
+	t.Run("coalesces onto a running task", func(t *testing.T) {
+		tq := newTestQueue(10)
+		id1, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique: %v", err)
+		}
+		claimed, _, _, err := tq.NextTask(ctx, nil) // marks id1 Running
+		if err != nil {
+			t.Fatalf("NextTask: %v", err)
+		}
+		if claimed != id1 {
+			t.Fatalf("claimed %v want %v", claimed, id1)
+		}
+		id2, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique while running: %v", err)
+		}
+		if id2 != id1 {
+			t.Errorf("coalesce onto running: got %v want %v", id2, id1)
+		}
+		list, _ := tq.List(ctx)
+		if len(list) != 1 {
+			t.Fatalf("task count: got %d want 1", len(list))
+		}
+	})
+
+	t.Run("creates a new task after the previous one is terminal", func(t *testing.T) {
+		tq := newTestQueue(10)
+		id1, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique: %v", err)
+		}
+		if err := tq.SetStatus(ctx, id1, TaskStatusComplete, time.Time{}, time.Now()); err != nil {
+			t.Fatalf("SetStatus: %v", err)
+		}
+		id2, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique after complete: %v", err)
+		}
+		if id2 == id1 {
+			t.Errorf("expected a new task after completion, got the same id %v", id1)
+		}
+	})
+
+	t.Run("different names do not coalesce", func(t *testing.T) {
+		tq := newTestQueue(10)
+		id1, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique scan: %v", err)
+		}
+		id2, err := tq.AddUnique("cleanup", nil)
+		if err != nil {
+			t.Fatalf("AddUnique cleanup: %v", err)
+		}
+		if id1 == id2 {
+			t.Errorf("different names coalesced: both %v", id1)
+		}
+		list, _ := tq.List(ctx)
+		if len(list) != 2 {
+			t.Fatalf("task count: got %d want 2", len(list))
+		}
+	})
+}
+
 func TestQueueList(t *testing.T) {
 	ctx := context.Background()
 	tq := newTestQueue(10)

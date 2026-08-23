@@ -198,6 +198,28 @@ func (q *TaskQueue) recoverTasks(p TaskStatePersistence) {
 func (q *TaskQueue) Add(name string, params []byte) (uuid.UUID, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	return q.addLocked(name, params)
+}
+
+// AddUnique enqueues name unless a task with the same name is already Waiting or
+// Running, in which case it enqueues nothing and returns that task's id. It is
+// the singleton enqueue path: a duplicate coalesces onto the instance already in
+// flight. A coalesced return never yields ErrQueueFull (it adds nothing); only a
+// genuine new insert can.
+func (q *TaskQueue) AddUnique(name string, params []byte) (uuid.UUID, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, t := range q.tasks {
+		if t.name == name && (t.status == TaskStatusWaiting || t.status == TaskStatusRunning) {
+			return t.id, nil
+		}
+	}
+	return q.addLocked(name, params)
+}
+
+// addLocked appends a new Waiting task and mirrors it to persistence. The caller
+// must hold q.mu.
+func (q *TaskQueue) addLocked(name string, params []byte) (uuid.UUID, error) {
 	if q.countStatusUnsafe(TaskStatusWaiting) >= q.maxWaiting {
 		return uuid.Nil, ErrQueueFull
 	}
