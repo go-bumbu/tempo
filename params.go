@@ -52,22 +52,23 @@ func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, log 
 	r.registry.add(name, registered{run: fn, maxParallelism: o.maxParallelism, singleton: o.singleton})
 }
 
-// enqueue routes name onto the queue, honouring a singleton registration: a task
-// registered WithSingleton is added via the queue's AddUnique so a duplicate
-// coalesces onto the instance already waiting or running. Unknown or
-// non-singleton names use the unconditional Add.
-func (r *QueueRunner) enqueue(name string, params []byte) (uuid.UUID, error) {
+// enqueue routes name onto the queue, honouring a singleton registration, and
+// reports whether the enqueue coalesced onto an existing waiting/running task.
+func (r *QueueRunner) enqueue(name string, params []byte) (uuid.UUID, bool, error) {
 	if entry, ok := r.registry.lookup(name); ok && entry.singleton {
 		return r.queue.AddUnique(name, params)
 	}
-	return r.queue.Add(name, params)
+	id, err := r.queue.Add(name, params)
+	return id, false, err
 }
 
-// AddRaw enqueues a task by name with a raw parameter payload (may be nil).
+// AddRaw enqueues a task by name with a raw parameter payload (may be nil). It
+// returns the task id, whether the enqueue coalesced onto an existing
+// waiting/running instance of a WithSingleton task, and any error.
 // tempo does not copy the params slice: callers must not mutate a slice passed
 // to AddRaw after the call, and raw handlers must not mutate the params slice
 // they receive.
-func (r *QueueRunner) AddRaw(name string, params []byte) (uuid.UUID, error) {
+func (r *QueueRunner) AddRaw(name string, params []byte) (uuid.UUID, bool, error) {
 	return r.enqueue(name, params)
 }
 
@@ -90,12 +91,12 @@ func Register[T any](r *QueueRunner, name string, fn func(ctx context.Context, l
 	})
 }
 
-// Enqueue enqueues a task by name with typed parameters, JSON-encoded. T is
-// inferred from params.
-func Enqueue[T any](r *QueueRunner, name string, params T) (uuid.UUID, error) {
+// Enqueue enqueues a task by name with typed parameters, JSON-encoded. It
+// returns the task id, whether the enqueue coalesced (see AddRaw), and any error.
+func Enqueue[T any](r *QueueRunner, name string, params T) (uuid.UUID, bool, error) {
 	raw, err := json.Marshal(params)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("tempo: encode params for task %q: %w", name, err)
+		return uuid.Nil, false, fmt.Errorf("tempo: encode params for task %q: %w", name, err)
 	}
 	return r.enqueue(name, raw)
 }

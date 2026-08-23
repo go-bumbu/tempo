@@ -41,12 +41,12 @@ tempo.Register(runner, "scan", func(ctx context.Context, log *slog.Logger, p Sca
 runner.StartBg()
 
 // enqueue with typed params
-if _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
+if _, _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
     panic(err)
 }
 
 // or enqueue by name with a raw JSON payload (e.g. from an HTTP handler)
-if _, err := runner.AddRaw("scan", []byte(`{"mode":"normal"}`)); err != nil {
+if _, _, err := runner.AddRaw("scan", []byte(`{"mode":"normal"}`)); err != nil {
     panic(err)
 }
 
@@ -93,11 +93,21 @@ in-memory persistence has no `List`, so it recovers nothing.
 Register a task with `tempo.WithSingleton()` to keep at most one instance of it
 in the queue. While an instance is **waiting or running**, enqueuing that task
 again — via `Enqueue`, `AddRaw`, or a schedule fire — adds nothing and returns
-the in-flight task's id; once it reaches a terminal state, the next enqueue
-starts a fresh one.
+`(that task's id, true, nil)`; once it reaches a terminal state, the next
+enqueue starts a fresh one and returns `(new id, false, nil)`. The `coalesced`
+bool lets a caller tell a coalesced duplicate from a fresh enqueue; `error`
+stays reserved for genuine failures such as `ErrQueueFull`.
 
 ```go
 tempo.Register(runner, "reindex", reindex, tempo.WithSingleton())
+
+id, coalesced, err := runner.AddRaw("reindex", nil)
+if err != nil {
+    panic(err) // real failure, e.g. ErrQueueFull
+}
+if coalesced {
+    fmt.Printf("reindex already queued or running as %s\n", id)
+}
 ```
 
 This differs from `WithMaxParallelism(1)`: that lets duplicates pile up as

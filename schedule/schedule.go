@@ -72,7 +72,8 @@ type ScheduleInfo struct {
 }
 
 // Enqueuer is how a fire reaches the task queue. *tempo.QueueRunner satisfies
-// this interface as-is; no adapter is needed.
+// it directly. The bool reports whether the enqueue coalesced onto an existing
+// waiting/running task (a WithSingleton duplicate).
 type Enqueuer interface {
-	AddRaw(name string, params []byte) (uuid.UUID, error)
+	AddRaw(name string, params []byte) (uuid.UUID, bool, error)
 }

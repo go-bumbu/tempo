@@ -48,7 +48,7 @@ func ExampleQueueRunner() {
 
 	for i := range 5 {
 		name := fmt.Sprintf(taskNameFmt, i)
-		_, err := qrun.AddRaw(name, nil)
+		_, _, err := qrun.AddRaw(name, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -100,7 +100,7 @@ func ExampleMemTaskLogSink() {
 
 	qrun.StartBg()
 
-	id, err := qrun.AddRaw(LoggedTask, nil)
+	id, _, err := qrun.AddRaw(LoggedTask, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -159,11 +159,11 @@ func ExampleQueueRunner_runHttpServer() {
 
 	q.StartBg()
 
-	_, err = q.AddRaw(Server1, nil)
+	_, _, err = q.AddRaw(Server1, nil)
 	if err != nil {
 		panic(err)
 	}
-	_, err = q.AddRaw(Server2, nil)
+	_, _, err = q.AddRaw(Server2, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -264,15 +264,15 @@ func ExampleQueueRunner_perTaskParallelism() {
 	// The partial scan and three thumbnails start together (one scan slot +
 	// three thumb slots). The full scan is enqueued last and waits — scan is
 	// capped at one — so it runs only after the partial scan completes.
-	if _, err := tempo.Enqueue(runner, Scan, ScanParams{Mode: "partial"}); err != nil {
+	if _, _, err := tempo.Enqueue(runner, Scan, ScanParams{Mode: "partial"}); err != nil {
 		panic(err)
 	}
 	for _, th := range []ThumbParams{{ImageID: "a", WorkMS: 30}, {ImageID: "b", WorkMS: 60}, {ImageID: "c", WorkMS: 90}} {
-		if _, err := tempo.Enqueue(runner, GenerateThumb, th); err != nil {
+		if _, _, err := tempo.Enqueue(runner, GenerateThumb, th); err != nil {
 			panic(err)
 		}
 	}
-	if _, err := tempo.Enqueue(runner, Scan, ScanParams{Mode: "full"}); err != nil {
+	if _, _, err := tempo.Enqueue(runner, Scan, ScanParams{Mode: "full"}); err != nil {
 		panic(err)
 	}
 
@@ -422,7 +422,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		go func(worker int) {
 			defer wg.Done()
 			for j := 0; j < 6; j++ {
-				_, _ = runner.AddRaw(Work, nil)
+				_, _, _ = runner.AddRaw(Work, nil)
 				time.Sleep(1 * time.Millisecond)
 			}
 		}(i)
@@ -469,7 +469,7 @@ func ExampleQueueRunner_filePersistenceAndRestart() {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 4; j++ {
-				_, _ = runner2.AddRaw(Work, nil)
+				_, _, _ = runner2.AddRaw(Work, nil)
 			}
 		}()
 	}

@@ -77,7 +77,7 @@ func TestRunnerPerTaskLogIsolation(t *testing.T) {
 		idToName := make(map[uuid.UUID]string, n)
 		for i := 0; i < n; i++ {
 			name := fmt.Sprintf("task-%d", i)
-			id, err := r.AddRaw(name, nil)
+			id, _, err := r.AddRaw(name, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -141,7 +141,7 @@ func TestWithGroupEmptyIsNoop(t *testing.T) {
 		return nil
 	})
 	r.StartBg()
-	id, err := r.AddRaw("t", nil)
+	id, _, err := r.AddRaw("t", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestRunnerLogLevelFiltering(t *testing.T) {
 			return nil
 		})
 		r.StartBg()
-		id, err := r.AddRaw("x", nil)
+		id, _, err := r.AddRaw("x", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

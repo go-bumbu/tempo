@@ -25,14 +25,14 @@ type fakeEnqueuer struct {
 	err   error
 }
 
-func (f *fakeEnqueuer) AddRaw(name string, params []byte) (uuid.UUID, error) {
+func (f *fakeEnqueuer) AddRaw(name string, params []byte) (uuid.UUID, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
-		return uuid.Nil, f.err
+		return uuid.Nil, false, f.err
 	}
 	f.calls = append(f.calls, enqueued{name: name, params: params})
-	return uuid.New(), nil
+	return uuid.New(), false, nil
 }
 
 func (f *fakeEnqueuer) snapshot() []enqueued {
