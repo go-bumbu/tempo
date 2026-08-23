@@ -19,8 +19,9 @@ type QueueRunner struct {
 	historySize  int
 	cleanupTimer time.Duration
 
-	logSink  TaskLogSink
-	logLevel slog.Level
+	logSink      TaskLogSink
+	progressSink TaskProgressSink
+	logLevel     slog.Level
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -52,6 +53,8 @@ type RunnerCfg struct {
 	LogSink TaskLogSink
 	// LogLevel is the minimum slog level sent to LogSink (e.g. slog.LevelInfo). Zero is Info.
 	LogLevel slog.Level
+	// ProgressSink, when set, receives task progress updates. Each task handler is given a Progress reporter to publish them.
+	ProgressSink TaskProgressSink
 }
 
 // NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterRaw or Register to add task definitions. cfg.Persistence must not be nil.
@@ -80,6 +83,7 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		historySize:  cfg.HistorySize,
 		cleanupTimer: cfg.CleanupTimer,
 		logSink:      cfg.LogSink,
+		progressSink: cfg.ProgressSink,
 		logLevel:     cfg.LogLevel,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -150,6 +154,12 @@ func (r *QueueRunner) StartBg() {
 				} else {
 					taskLog = discardLogger
 				}
+				var taskProg Progress
+				if r.progressSink != nil {
+					taskProg = newSinkReporter(r.progressSink, id)
+				} else {
+					taskProg = discardProgress
+				}
 				r.appendTaskLog(childCtx, id, "INFO", "task started")
 
 				var finalStatus TaskStatus
@@ -168,7 +178,7 @@ func (r *QueueRunner) StartBg() {
 							r.appendTaskLog(childCtx, id, "ERROR", fmt.Sprint(recVal))
 						}
 					}()
-					taskErr := entry.run(childCtx, taskLog, params)
+					taskErr := entry.run(childCtx, taskLog, taskProg, params)
 					finalEndedAt = time.Now()
 					if taskErr == nil {
 						finalStatus = TaskStatusComplete

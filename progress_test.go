@@ -3,6 +3,7 @@ package tempo
 import (
 	"context"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,5 +82,68 @@ func TestMemProgressSinkRoundTrip(t *testing.T) {
 	}
 	if _, ok, _ := s.Progress(ctx, b); ok {
 		t.Fatal("after RetainOnly(none), b should be gone")
+	}
+}
+
+// captureSink records every ProgressState that Set forwards to it.
+type captureSink struct {
+	mu   sync.Mutex
+	last ProgressState
+	n    int
+}
+
+func (c *captureSink) Set(_ context.Context, _ uuid.UUID, p ProgressState) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.last = p
+	c.n++
+	return nil
+}
+
+func TestSinkReporterForwardsSnapshots(t *testing.T) {
+	cs := &captureSink{}
+	r := newSinkReporter(cs, uuid.New())
+	r.SetTotal(10)
+	r.SetStage("work")
+	if got := r.Inc(3); got != 3 {
+		t.Fatalf("Inc = %d, want 3", got)
+	}
+	r.Set(5)
+
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.n != 4 {
+		t.Fatalf("Set forwarded %d times, want 4", cs.n)
+	}
+	if cs.last.Done != 5 || cs.last.Total != 10 || cs.last.Stage != "work" {
+		t.Fatalf("last snapshot = %+v; want Done=5 Total=10 Stage=work", cs.last)
+	}
+	if cs.last.UpdatedAt.IsZero() {
+		t.Fatal("snapshot UpdatedAt not stamped")
+	}
+}
+
+func TestSinkReporterConcurrent(t *testing.T) {
+	cs := &captureSink{}
+	r := newSinkReporter(cs, uuid.New())
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); r.Inc(1) }()
+	}
+	wg.Wait()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.last.Done != 50 {
+		t.Fatalf("after 50 concurrent Inc, Done = %d, want 50", cs.last.Done)
+	}
+}
+
+func TestDiscardProgress(t *testing.T) {
+	discardProgress.SetTotal(5)
+	discardProgress.Set(3)
+	discardProgress.SetStage("x")
+	if got := discardProgress.Inc(2); got != 0 {
+		t.Fatalf("discard Inc = %d, want 0", got)
 	}
 }

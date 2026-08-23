@@ -90,7 +90,7 @@ func TestRunnerRunsRecoveredWaitingTask(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	ran := make(chan uuid.UUID, 1)
-	runner.RegisterRaw("scan", func(ctx context.Context, _ *slog.Logger, _ []byte) error {
+	runner.RegisterRaw("scan", func(ctx context.Context, _ *slog.Logger, _ tempo.Progress, _ []byte) error {
 		ran <- enqueued.ID
 		return nil
 	})

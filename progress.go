@@ -135,3 +135,81 @@ var (
 	_ TaskProgressReader  = (*MemTaskProgressSink)(nil)
 	_ TaskProgressCleaner = (*MemTaskProgressSink)(nil)
 )
+
+// Progress is how a running job reports its progress. The runner hands one to
+// every task handler. It is safe to call from multiple goroutines, and it is a
+// no-op when the runner has no ProgressSink configured, so a job may always
+// call it.
+type Progress interface {
+	SetTotal(total int64)
+	Set(done int64)
+	Inc(delta int64) int64
+	SetStage(msg string)
+}
+
+// discardProgress backs a task whose runner has no ProgressSink configured.
+var discardProgress Progress = discardReporter{}
+
+type discardReporter struct{}
+
+func (discardReporter) SetTotal(int64)  {}
+func (discardReporter) Set(int64)       {}
+func (discardReporter) Inc(int64) int64 { return 0 }
+func (discardReporter) SetStage(string) {}
+
+// sinkReporter is the per-task Progress the runner hands to a job. It accumulates
+// Done/Total/Stage and forwards a full ProgressState snapshot to the sink on each
+// change. It is the progress twin of sinkHandler.
+type sinkReporter struct {
+	sink   TaskProgressSink
+	taskID uuid.UUID
+	mu     sync.Mutex
+	state  ProgressState
+}
+
+// newSinkReporter returns a Progress bound to one task id, forwarding to sink.
+func newSinkReporter(sink TaskProgressSink, taskID uuid.UUID) Progress {
+	return &sinkReporter{sink: sink, taskID: taskID}
+}
+
+func (r *sinkReporter) SetTotal(total int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state.Total = total
+	r.flushLocked()
+}
+
+func (r *sinkReporter) Set(done int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state.Done = done
+	r.flushLocked()
+}
+
+func (r *sinkReporter) Inc(delta int64) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state.Done += delta
+	r.flushLocked()
+	return r.state.Done
+}
+
+func (r *sinkReporter) SetStage(msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state.Stage = msg
+	r.flushLocked()
+}
+
+// flushLocked stamps the time and forwards a snapshot; the caller holds r.mu, so
+// snapshots reach the sink in call order. The sink's error is ignored, matching
+// appendTaskLog.
+func (r *sinkReporter) flushLocked() {
+	r.state.UpdatedAt = time.Now()
+	_ = r.sink.Set(context.Background(), r.taskID, r.state)
+}
+
+var (
+	_ Progress = discardReporter{}
+	_ Progress = (*sinkReporter)(nil)
+)

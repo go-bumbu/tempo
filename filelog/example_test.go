@@ -24,7 +24,7 @@ func ExampleStore() {
 		Persistence: tempo.NewMemPersistence(),
 		LogSink:     sink, LogLevel: slog.LevelInfo,
 	})
-	r.RegisterRaw("greet", func(_ context.Context, log *slog.Logger, _ []byte) error {
+	r.RegisterRaw("greet", func(_ context.Context, log *slog.Logger, _ tempo.Progress, _ []byte) error {
 		log.Info("hello", "who", "world")
 		return nil
 	})
