@@ -152,6 +152,27 @@ func TestQueueAddUnique(t *testing.T) {
 		}
 	})
 
+	t.Run("creates a new task when the previous one is in cancel-error state", func(t *testing.T) {
+		// CancelError is neither Waiting nor Running, and CleanHistory never trims
+		// it (not in TaskTerminalStatus), so it must not hold the singleton slot —
+		// otherwise the task could never be enqueued again.
+		tq := newTestQueue(10)
+		id1, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique: %v", err)
+		}
+		if err := tq.SetStatus(ctx, id1, TaskStatusCancelError, time.Time{}, time.Now()); err != nil {
+			t.Fatalf("SetStatus: %v", err)
+		}
+		id2, err := tq.AddUnique("scan", nil)
+		if err != nil {
+			t.Fatalf("AddUnique after cancel-error: %v", err)
+		}
+		if id2 == id1 {
+			t.Errorf("cancel-error task held the singleton slot; expected a new id, got %v", id1)
+		}
+	})
+
 	t.Run("different names do not coalesce", func(t *testing.T) {
 		tq := newTestQueue(10)
 		id1, err := tq.AddUnique("scan", nil)
