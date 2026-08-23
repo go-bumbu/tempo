@@ -93,12 +93,15 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		runningCount: make(map[string]int),
 	}
 
+	list, _ := queue.List(context.Background())
+	ids := make([]uuid.UUID, 0, len(list))
+	for _, info := range list {
+		ids = append(ids, info.ID)
+	}
 	if c, ok := cfg.LogSink.(TaskLogCleaner); ok {
-		list, _ := queue.List(context.Background())
-		ids := make([]uuid.UUID, 0, len(list))
-		for _, info := range list {
-			ids = append(ids, info.ID)
-		}
+		_ = c.RetainOnly(context.Background(), ids)
+	}
+	if c, ok := cfg.ProgressSink.(TaskProgressCleaner); ok {
 		_ = c.RetainOnly(context.Background(), ids)
 	}
 	return r, nil
@@ -252,6 +255,9 @@ func (r *QueueRunner) cleanupOnce(ctx context.Context) {
 		return
 	}
 	if c, ok := r.logSink.(TaskLogCleaner); ok {
+		_ = c.RemoveTasks(ctx, removed)
+	}
+	if c, ok := r.progressSink.(TaskProgressCleaner); ok {
 		_ = c.RemoveTasks(ctx, removed)
 	}
 }
