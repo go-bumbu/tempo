@@ -52,20 +52,11 @@ func TestLogsToleratesTruncatedFinalLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := uuid.New()
-	// One clean, complete line.
-	if err := s.Append(ctx, id, "INFO", "survived"); err != nil {
-		t.Fatal(err)
-	}
-	// Then a crash/kill mid-Append leaves a partial JSON fragment with no
-	// trailing newline. Simulate it by appending a truncated line directly.
-	f, err := os.OpenFile(filepath.Join(dir, id.String()+".jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.WriteString(`{"at":"2026-09-08T00:00:00Z","level":"INFO","msg":"tru`); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
+	// One clean, complete line, then a partial JSON fragment with no trailing
+	// newline — exactly what a crash/kill (or ENOSPC) mid-Append leaves behind.
+	content := []byte(`{"at":"2026-09-08T00:00:00Z","level":"INFO","msg":"survived"}
+{"at":"2026-09-08T00:00:00Z","level":"INFO","msg":"tru`)
+	if err := os.WriteFile(filepath.Join(dir, id.String()+".jsonl"), content, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,7 +81,7 @@ func TestLogsStillErrorsOnMidFileCorruption(t *testing.T) {
 	// so it was a complete write that is genuinely corrupt, not a torn tail.
 	// This must stay an error, not be silently dropped.
 	corrupt := []byte("{\"msg\":\"ok\"}\nnot json\n{\"msg\":\"after\"}\n")
-	if err := os.WriteFile(filepath.Join(dir, id.String()+".jsonl"), corrupt, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, id.String()+".jsonl"), corrupt, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Logs(ctx, id); err == nil {
