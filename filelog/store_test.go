@@ -44,6 +44,60 @@ func TestLogsUnknownIDIsNil(t *testing.T) {
 	}
 }
 
+func TestLogsToleratesTruncatedFinalLine(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := filelog.New(filelog.Config{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	// One clean, complete line.
+	if err := s.Append(ctx, id, "INFO", "survived"); err != nil {
+		t.Fatal(err)
+	}
+	// Then a crash/kill mid-Append leaves a partial JSON fragment with no
+	// trailing newline. Simulate it by appending a truncated line directly.
+	f, err := os.OpenFile(filepath.Join(dir, id.String()+".jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"at":"2026-09-08T00:00:00Z","level":"INFO","msg":"tru`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Logs(ctx, id)
+	if err != nil {
+		t.Fatalf("Logs errored on a truncated final line: %v", err)
+	}
+	if len(got) != 1 || got[0].Message != "survived" {
+		t.Fatalf("Logs = %+v; want the single intact entry", got)
+	}
+}
+
+func TestLogsStillErrorsOnMidFileCorruption(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := filelog.New(filelog.Config{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	// A corrupt line in the *middle* of the file: it is followed by a newline,
+	// so it was a complete write that is genuinely corrupt, not a torn tail.
+	// This must stay an error, not be silently dropped.
+	corrupt := []byte("{\"msg\":\"ok\"}\nnot json\n{\"msg\":\"after\"}\n")
+	if err := os.WriteFile(filepath.Join(dir, id.String()+".jsonl"), corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Logs(ctx, id); err == nil {
+		t.Fatal("Logs did not error on mid-file corruption; a bad non-final line must not be silently dropped")
+	}
+}
+
 func TestConcurrentAppend(t *testing.T) {
 	ctx := context.Background()
 	s, _ := filelog.New(filelog.Config{Dir: t.TempDir()})
