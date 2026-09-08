@@ -122,12 +122,22 @@ func (s *Store) Logs(_ context.Context, taskID uuid.UUID) ([]tempo.LogEntry, err
 		return nil, err
 	}
 	var out []tempo.LogEntry
-	for _, raw := range bytes.Split(data, []byte("\n")) {
+	segs := bytes.Split(data, []byte("\n"))
+	for i, raw := range segs {
 		if len(raw) == 0 {
 			continue
 		}
 		var l line
 		if err := json.Unmarshal(raw, &l); err != nil {
+			// A crash or kill (or ENOSPC) mid-Append can leave a partial final
+			// line with no trailing newline. Tolerate a malformed *final*
+			// segment by dropping it and returning the intact prefix; a bad
+			// line anywhere earlier is genuine mid-file corruption and stays an
+			// error. A complete line is always followed by "\n", so a non-empty
+			// last segment is precisely a torn write.
+			if i == len(segs)-1 {
+				break
+			}
 			return nil, fmt.Errorf("filelog: parse %s: %w", taskID, err)
 		}
 		out = append(out, tempo.LogEntry{Level: l.Level, Message: l.Msg, At: l.At})
