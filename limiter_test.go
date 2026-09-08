@@ -92,15 +92,30 @@ func TestLimiter_AllOrNothing_NoGroupLeakWhenNameFull(t *testing.T) {
 
 func TestLimiter_ReleaseIsIdempotent(t *testing.T) {
 	l := newLimiter()
-	rel, ok := l.tryAcquire("a", 1, "")
+	// Two holders of "a" at capacity 2.
+	h1, ok := l.tryAcquire("a", 2, "")
 	if !ok {
-		t.Fatal("acquire should succeed")
+		t.Fatal("first acquire should succeed")
 	}
-	rel()
-	rel() // second call must be a no-op, not a second decrement
-	rel2, ok := l.tryAcquire("a", 1, "")
+	h2, ok := l.tryAcquire("a", 2, "")
 	if !ok {
-		t.Fatal("acquire after an idempotent release should succeed")
+		t.Fatal("second acquire should succeed")
 	}
-	rel2()
+	// At capacity: a third must fail.
+	if _, ok := l.tryAcquire("a", 2, ""); ok {
+		t.Fatal("third acquire past capacity should fail")
+	}
+	// Release h1 twice. A non-idempotent release would also free h2's slot.
+	h1()
+	h1()
+	// Exactly one slot should now be free: one acquire succeeds, the next fails.
+	r1, ok := l.tryAcquire("a", 2, "")
+	if !ok {
+		t.Fatal("one slot should be free after releasing a single holder")
+	}
+	if _, ok := l.tryAcquire("a", 2, ""); ok {
+		t.Fatal("a double-release must not free a second slot (release not idempotent)")
+	}
+	r1()
+	h2()
 }
