@@ -31,9 +31,9 @@ type QueueRunner struct {
 	stopChan  chan struct{}
 	wg        sync.WaitGroup
 
-	runMu        sync.Mutex
-	running      map[uuid.UUID]runState
-	runningCount map[string]int
+	runMu   sync.Mutex
+	running map[uuid.UUID]runState
+	limiter *limiter
 }
 
 type runState struct {
@@ -90,7 +90,7 @@ func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 		startDone:    make(chan struct{}),
 		stopChan:     make(chan struct{}),
 		running:      make(map[uuid.UUID]runState),
-		runningCount: make(map[string]int),
+		limiter:      newLimiter(),
 	}
 
 	list, _ := queue.List(context.Background())
@@ -126,18 +126,16 @@ func (r *QueueRunner) StartBg() {
 		go func() {
 			defer r.wg.Done()
 			for {
-				canClaim := r.buildCanClaim()
+				canClaim, release := r.buildClaim()
 				id, name, params, err := r.queue.NextTask(r.ctx, canClaim)
 				if err != nil {
 					return
 				}
-				// runningCount was already incremented by canClaim, atomically
-				// with the claim (see buildCanClaim); do not bump it again here.
 
 				entry, ok := r.registry.lookup(name)
 				if !ok {
 					_ = r.queue.SetStatus(context.Background(), id, TaskStatusFailed, time.Time{}, time.Now())
-					r.decrRunningCount(name)
+					release()
 					continue
 				}
 
@@ -174,7 +172,7 @@ func (r *QueueRunner) StartBg() {
 						r.runMu.Lock()
 						delete(r.running, id)
 						r.runMu.Unlock()
-						r.decrRunningCount(name)
+						release()
 						if recVal := recover(); recVal != nil {
 							finalStatus = TaskStatusPanicked
 							finalEndedAt = time.Now()
@@ -208,32 +206,36 @@ func (r *QueueRunner) appendTaskLog(ctx context.Context, id uuid.UUID, level str
 	}
 }
 
-// buildCanClaim returns the claim gate NextTask calls (while holding the queue
-// lock) to decide whether a waiting task may run. It reserves the slot as part
-// of the check: when it allows the task it increments runningCount before
-// returning, so two workers can never both pass a per-task limit before either
-// records its claim. The reservation is released by decrRunningCount once the
-// task finishes (or by the caller when the registry lookup fails).
-func (r *QueueRunner) buildCanClaim() func(name string) bool {
-	return func(name string) bool {
-		entry, ok := r.registry.lookup(name)
-		r.runMu.Lock()
-		defer r.runMu.Unlock()
-		if ok && entry.maxParallelism > 0 && r.runningCount[name] >= entry.maxParallelism {
+// buildClaim returns the claim gate NextTask calls (while holding the queue
+// lock) to decide whether a waiting task may run, plus a release func to free
+// the reservation once the task finishes. The gate reserves the task's slots —
+// its per-name slot and, if it was registered with WithExclusionGroup, its
+// group slot — atomically via the limiter, so two workers can never both pass a
+// limit before either records its claim. NextTask calls the gate at most once
+// successfully per call, for the task it returns; release frees exactly that
+// task's reservation and is a no-op (and idempotent) if nothing was claimed.
+func (r *QueueRunner) buildClaim() (canClaim func(name string) bool, release func()) {
+	var held func()
+	canClaim = func(name string) bool {
+		var nameLimit int
+		var group string
+		if entry, ok := r.registry.lookup(name); ok {
+			nameLimit = entry.maxParallelism
+			group = entry.group
+		}
+		rel, ok := r.limiter.tryAcquire(name, nameLimit, group)
+		if !ok {
 			return false
 		}
-		r.runningCount[name]++
+		held = rel
 		return true
 	}
-}
-
-func (r *QueueRunner) decrRunningCount(name string) {
-	r.runMu.Lock()
-	r.runningCount[name]--
-	if r.runningCount[name] <= 0 {
-		delete(r.runningCount, name)
+	release = func() {
+		if held != nil {
+			held()
+		}
 	}
-	r.runMu.Unlock()
+	return canClaim, release
 }
 
 func (r *QueueRunner) autoClean() {
