@@ -25,7 +25,17 @@ benchmark: ## run go benchmarks
 	@go test -run=^$$ -bench=. ./...
 
 .PHONY: verify
-verify: lint test-race license-check benchmark coverage ## run all tests
+verify: ## run all checks; runs every check and fails if any fail
+	@fail=0; \
+	for target in lint test-race license-check benchmark coverage; do \
+		echo "==================== make $$target ===================="; \
+		$(MAKE) --no-print-directory $$target || fail=1; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo "❌ verify failed (see above)"; \
+		exit 1; \
+	fi; \
+	echo "✅ verify passed"
 
 # Default coverage threshold is 80
 COVERAGE_THRESHOLD ?= 80
