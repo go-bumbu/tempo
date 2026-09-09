@@ -115,6 +115,34 @@ waiting and only serializes their execution, whereas `WithSingleton` never
 queues a duplicate in the first place. Dedup is by **task name** and within a
 single process; it does not coordinate across processes sharing a database.
 
+## Exclusion groups
+
+Some tasks must not run at the same time as each other — a `scan` and a
+`reindex` over the same files, say. Register each with the same
+`tempo.WithExclusionGroup(name)` and the runner lets at most one task in that
+group run at a time, across all task names in it:
+
+```go
+tempo.Register(runner, "scan", scan, tempo.WithExclusionGroup("files"))
+tempo.Register(runner, "reindex", reindex, tempo.WithExclusionGroup("files"))
+```
+
+While a group member runs, another member stays waiting and is claimed as soon
+as the group frees; tasks outside the group (or in a different group) are
+unaffected and keep running in parallel. A group-blocked task does not hold up
+the queue — workers skip it and run other eligible tasks meanwhile.
+
+How this differs from the other options:
+
+- `WithMaxParallelism(n)` caps concurrent instances of **one** task name.
+- `WithSingleton()` keeps at most one instance of **one** task name in the queue,
+  coalescing duplicates at enqueue time.
+- `WithExclusionGroup(name)` serializes **several** task names against each other
+  at run time — mutual exclusion across the group.
+
+The options compose. Exclusion is by group name and within a single process; it
+does not coordinate across processes sharing a database.
+
 ## Scheduling
 
 `tempo/schedule` runs tasks on a cron timetable. Schedules are persisted and can

@@ -15,6 +15,7 @@ type TaskOption func(*taskOpts)
 type taskOpts struct {
 	maxParallelism int
 	singleton      bool
+	group          string
 }
 
 // WithMaxParallelism caps how many instances of this task name run at once.
@@ -33,6 +34,19 @@ func WithSingleton() TaskOption {
 	return func(o *taskOpts) { o.singleton = true }
 }
 
+// WithExclusionGroup puts the task in a named exclusion group: at most one task
+// whose registration names the same group runs at a time, across all task names
+// in the group. Use it to serialize different tasks that must not run together —
+// e.g. "scan" and "reindex" over the same files. An empty name means no group.
+//
+// It composes with the other options: WithMaxParallelism caps instances of a
+// single name, WithSingleton dedups a name at enqueue time, and
+// WithExclusionGroup serializes a set of names at run time. Exclusion is within
+// a single process; it does not coordinate across processes sharing a database.
+func WithExclusionGroup(name string) TaskOption {
+	return func(o *taskOpts) { o.group = name }
+}
+
 func applyTaskOpts(opts []TaskOption) taskOpts {
 	var o taskOpts
 	for _, opt := range opts {
@@ -49,7 +63,7 @@ func applyTaskOpts(opts []TaskOption) taskOpts {
 // they receive.
 func (r *QueueRunner) RegisterRaw(name string, fn func(ctx context.Context, log *slog.Logger, prog Progress, params []byte) error, opts ...TaskOption) {
 	o := applyTaskOpts(opts)
-	r.registry.add(name, registered{run: fn, maxParallelism: o.maxParallelism, singleton: o.singleton})
+	r.registry.add(name, registered{run: fn, maxParallelism: o.maxParallelism, singleton: o.singleton, group: o.group})
 }
 
 // enqueue routes name onto the queue, honouring a singleton registration, and
@@ -88,6 +102,7 @@ func Register[T any](r *QueueRunner, name string, fn func(ctx context.Context, l
 		},
 		maxParallelism: o.maxParallelism,
 		singleton:      o.singleton,
+		group:          o.group,
 	})
 }
 
