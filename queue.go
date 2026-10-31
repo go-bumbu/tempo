@@ -160,10 +160,11 @@ func NewTaskQueue(cfg TaskQueueCfg) *TaskQueue {
 }
 
 // recoverTasks loads any persisted tasks into the queue (e.g. after a restart).
-// A task persisted as Running, or as CancelError (a run a Cancel timed out on),
-// was in-flight when the process died; no worker owns it now. NextTask only
-// claims Waiting tasks and CleanHistory only trims terminal ones, so leaving it
-// as is orphans it forever — it is recovered as Failed (terminal) instead.
+// A task persisted as Running, or as CancelError (a run a Cancel or Unregister
+// timed out on), was in-flight when the process died; no worker owns it now.
+// NextTask only claims Waiting tasks and CleanHistory only trims terminal ones,
+// so leaving it as is orphans it forever — it is recovered as Failed (terminal)
+// instead.
 func (q *TaskQueue) recoverTasks(p TaskStatePersistence) {
 	r, ok := p.(RecoverablePersistence)
 	if !ok {
@@ -202,11 +203,11 @@ func (q *TaskQueue) Add(name string, params []byte) (uuid.UUID, error) {
 }
 
 // AddUnique enqueues name unless a task with the same name is already Waiting,
-// Running or CancelError (still running after a Cancel timed out), in which case
-// it enqueues nothing and returns (that task's id, true). A fresh insert returns
-// (new id, false). The bool lets callers distinguish a coalesced duplicate from
-// a new enqueue. A coalesced return never yields ErrQueueFull (it adds nothing);
-// only a genuine new insert can.
+// Running or CancelError (still running after a Cancel or Unregister timed out),
+// in which case it enqueues nothing and returns (that task's id, true). A fresh
+// insert returns (new id, false). The bool lets callers distinguish a coalesced
+// duplicate from a new enqueue. A coalesced return never yields ErrQueueFull (it
+// adds nothing); only a genuine new insert can.
 func (q *TaskQueue) AddUnique(name string, params []byte) (uuid.UUID, bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -356,6 +357,34 @@ func (q *TaskQueue) transition(ctx context.Context, id uuid.UUID, from, to TaskS
 		return true, nil
 	}
 	return false, ErrTaskNotFound
+}
+
+// cancelNamed marks every Waiting task named name Canceled, ending it at
+// endedAt, and returns the ids of those it leaves in flight: Running, or
+// CancelError (a run a Cancel or Unregister timed out on). onLocked runs first,
+// with q.mu held, so no task is claimed between what it does and the
+// cancellation.
+func (q *TaskQueue) cancelNamed(ctx context.Context, name string, endedAt time.Time, onLocked func()) []uuid.UUID {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if onLocked != nil {
+		onLocked()
+	}
+	var inFlight []uuid.UUID
+	for _, t := range q.tasks {
+		if t.name != name {
+			continue
+		}
+		switch t.status {
+		case TaskStatusWaiting:
+			t.status = TaskStatusCanceled
+			t.endedAt = endedAt
+			_ = q.persist.SaveTask(ctx, q.recordToInfo(t))
+		case TaskStatusRunning, TaskStatusCancelError:
+			inFlight = append(inFlight, t.id)
+		}
+	}
+	return inFlight
 }
 
 // CleanHistory removes old terminal tasks so that at most maxDone remain, and

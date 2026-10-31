@@ -13,8 +13,9 @@ import (
 // enqueueJob is the quartz.Job registered for a schedule: when its trigger
 // fires, it enqueues the schedule's task on the runner.
 //
-// A fire that cannot be enqueued (a full queue, an unregistered task name) is
-// logged and dropped. Returning the error is safe: go-quartz reschedules a job
+// A fire that cannot be enqueued (a full queue, say) is logged and dropped; a
+// QueueRunner accepts a task name with no handler, and that task then fails.
+// Returning the error is safe: go-quartz reschedules a job
 // before executing it and defaults to zero retries, so an error neither
 // unschedules the job nor causes a re-run. A fire that coalesces onto an
 // already waiting/running WithSingleton task is logged as a skip and dropped —

@@ -85,17 +85,18 @@ runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 
 On startup the runner reloads persisted tasks: a task still **waiting** when the
 process died resumes and runs, while one caught **running** (or in
-**cancel_error**, still running after a timed-out `Cancel`) is reconciled to
-**failed** — no worker owns it, and re-running could repeat side effects. The
-in-memory persistence has no `List`, so it recovers nothing.
+**cancel_error**, still running after a timed-out `Cancel` or `Unregister`) is
+reconciled to **failed** — no worker owns it, and re-running could repeat side
+effects. The in-memory persistence has no `List`, so it recovers nothing.
 
 ## Singleton tasks
 
 Register a task with `tempo.WithSingleton()` to keep at most one instance of it
 in the queue. While an instance is **waiting or running** (including
-**cancel_error**, a run still stopping after a timed-out `Cancel`), enqueuing that
-task again — via `Enqueue`, `AddRaw`, or a schedule fire — adds nothing and returns
-`(that task's id, true, nil)`; once it reaches a terminal state, the next
+**cancel_error**, a run still stopping after a timed-out `Cancel` or
+`Unregister`), enqueuing that task again — via `Enqueue`, `AddRaw`, or a
+schedule fire — adds nothing and returns `(that task's id, true, nil)`; once it
+reaches a terminal state, the next
 enqueue starts a fresh one and returns `(new id, false, nil)`. The `coalesced`
 bool lets a caller tell a coalesced duplicate from a fresh enqueue; `error`
 stays reserved for genuine failures such as `ErrQueueFull`.
@@ -144,6 +145,31 @@ How this differs from the other options:
 
 The options compose. Exclusion is by group name and within a single process; it
 does not coordinate across processes sharing a database.
+
+## Unregistering tasks
+
+A task registered per entity, one per feed say, should go when its entity
+does. `Unregister` removes the handler and cancels the name's tasks as `Cancel`
+does: a **waiting** one is marked **canceled**, and a **running** one has its
+context canceled. It returns once the running ones have stopped, each with the
+status its return value gives; if its own context expires first, it returns an
+error and the tasks still running show **cancel_error** until they stop.
+
+```go
+tempo.Register(runner, "sync:"+feed.ID, syncFeed(feed))
+
+// when the feed is deleted
+if err := runner.Unregister(ctx, "sync:"+feed.ID); err != nil {
+    // a run was still stopping when ctx expired
+}
+```
+
+Until the name is registered again, a task enqueued under it is accepted, then
+fails, as for any name without a handler. So delete the schedules naming the
+task before you unregister it: a fire in between would add a failed task.
+
+`Unregister` waits for the name's running tasks, so a task of that name must
+not call it and wait: from one of them, start it in a new goroutine and return.
 
 ## Scheduling
 
@@ -196,8 +222,9 @@ Schedules persist across restarts with `dbschedule`:
 store, err := dbschedule.New(db) // AutoMigrates the tempo_schedules table
 ```
 
-A fire that cannot be enqueued — a full queue, an unregistered task name — is
-logged and dropped. Fires missed while the process was down are not replayed,
+A fire that cannot be enqueued, such as one that finds the queue full, is logged
+and dropped. A fire for a task name with no handler is enqueued, and the task
+fails. Fires missed while the process was down are not replayed,
 and a fire is enqueued even if the previous run is still going. Register the
 task with `tempo.WithMaxParallelism(1)` to serialize runs (a new fire still queues
 behind the current one), or `tempo.WithSingleton()` to skip the fire entirely

@@ -33,6 +33,12 @@ func (r *taskRegistry) add(name string, def registered) {
 	r.tasks[name] = def
 }
 
+func (r *taskRegistry) remove(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.tasks, name)
+}
+
 func (r *taskRegistry) lookup(name string) (registered, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
