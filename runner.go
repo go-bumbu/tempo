@@ -32,9 +32,10 @@ type QueueRunner struct {
 	wg        sync.WaitGroup
 
 	// running holds the run-state of each claimed task, from its claim until
-	// after its final status is recorded, so every task Cancel sees Running is
-	// one it can find here. Lock order: the queue lock, then runMu; never the
-	// reverse.
+	// after its final status is recorded, so every task Cancel or Unregister
+	// sees Running is one it can find here. Lock order: the queue lock, then
+	// runMu or the registry's lock (the claim gate reads it, Unregister writes
+	// it); never the reverse.
 	runMu   sync.Mutex
 	running map[uuid.UUID]runState
 	limiter *limiter
@@ -130,7 +131,7 @@ func (r *QueueRunner) StartBg() {
 		go func() {
 			defer r.wg.Done()
 			for {
-				canClaim, release := r.buildClaim()
+				canClaim, claimed, release := r.buildClaim()
 				childCtx, taskCancel := context.WithCancel(r.ctx)
 				state := runState{cancel: taskCancel, done: make(chan struct{})}
 				// Record the cancelable run-state as part of the claim: nextTask
@@ -140,13 +141,13 @@ func (r *QueueRunner) StartBg() {
 					r.running[id] = state
 					r.runMu.Unlock()
 				}
-				id, name, params, err := r.queue.nextTask(r.ctx, canClaim, register)
+				id, _, params, err := r.queue.nextTask(r.ctx, canClaim, register)
 				if err != nil {
 					taskCancel()
 					return
 				}
 
-				entry, ok := r.registry.lookup(name)
+				entry, ok := claimed()
 				if !ok {
 					r.finishRun(id, state, release, TaskStatusFailed, time.Now())
 					continue
@@ -229,35 +230,40 @@ func (r *QueueRunner) appendTaskLog(ctx context.Context, id uuid.UUID, level str
 }
 
 // buildClaim returns the claim gate NextTask calls (while holding the queue
-// lock) to decide whether a waiting task may run, plus a release func to free
-// the reservation once the task finishes. The gate reserves the task's slots —
-// its per-name slot and, if it was registered with WithExclusionGroup, its
-// group slot — atomically via the limiter, so two workers can never both pass a
-// limit before either records its claim. NextTask calls the gate at most once
-// successfully per call, for the task it returns; release frees exactly that
-// task's reservation and is a no-op (and idempotent) if nothing was claimed.
-func (r *QueueRunner) buildClaim() (canClaim func(name string) bool, release func()) {
+// lock) to decide whether a waiting task may run, a claimed func reporting the
+// handler the gate found for the task it let through, plus a release func to
+// free the reservation once the task finishes. The gate reserves the task's
+// slots — its per-name slot and, if it was registered with WithExclusionGroup,
+// its group slot — atomically via the limiter, so two workers can never both
+// pass a limit before either records its claim. NextTask calls the gate at most
+// once successfully per call, for the task it returns; release frees exactly
+// that task's reservation and is a no-op (and idempotent) if nothing was
+// claimed. The worker runs the handler from claimed rather than looking it up
+// again: Unregister removes a handler under the queue lock, so the one the gate
+// found is the one registered when the task was claimed, and Unregister cancels
+// the run instead of the worker failing it for want of a handler.
+func (r *QueueRunner) buildClaim() (canClaim func(name string) bool, claimed func() (registered, bool), release func()) {
 	var held func()
+	var claimedEntry registered
+	var claimedOK bool
 	canClaim = func(name string) bool {
-		var nameLimit int
-		var group string
-		if entry, ok := r.registry.lookup(name); ok {
-			nameLimit = entry.maxParallelism
-			group = entry.group
-		}
-		rel, ok := r.limiter.tryAcquire(name, nameLimit, group)
-		if !ok {
+		entry, ok := r.registry.lookup(name)
+		rel, acquired := r.limiter.tryAcquire(name, entry.maxParallelism, entry.group)
+		if !acquired {
 			return false
 		}
-		held = rel
+		held, claimedEntry, claimedOK = rel, entry, ok
 		return true
+	}
+	claimed = func() (registered, bool) {
+		return claimedEntry, claimedOK
 	}
 	release = func() {
 		if held != nil {
 			held()
 		}
 	}
-	return canClaim, release
+	return canClaim, claimed, release
 }
 
 func (r *QueueRunner) autoClean() {
@@ -319,21 +325,11 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 		return nil
 	}
 
-	r.runMu.Lock()
-	state, running := r.running[id]
-	r.runMu.Unlock()
-
-	if running {
-		state.cancel()
-		select {
-		case <-state.done:
-			return nil
-		case <-ctx.Done():
-			// Mark the run CancelError only while it is still running: if the
-			// worker recorded its final status first, that status stands.
-			_, _ = r.queue.transition(context.Background(), id, TaskStatusRunning, TaskStatusCancelError, time.Now())
-			return fmt.Errorf("cancel timeout: %w", ctx.Err())
+	if runs := r.runsOf(id); len(runs) > 0 {
+		if err := r.stopRuns(ctx, runs); err != nil {
+			return fmt.Errorf("cancel timeout: %w", err)
 		}
+		return nil
 	}
 
 	info, err := r.queue.Get(ctx, id)
@@ -341,6 +337,64 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	return fmt.Errorf("task not cancelable: status %s", info.Status.Str())
+}
+
+// Unregister removes the handler registered for name and cancels the tasks of
+// that name as Cancel does: a waiting task is marked Canceled, and a running one
+// has its ctx canceled. Unregister returns once the running ones have stopped,
+// each with the status its return value gives; if ctx is done first, it returns
+// an error and each task still running shows CancelError until it stops. A name
+// with no handler is not an error. Until name is registered again, a task
+// enqueued under it is accepted, then fails, as for any name without a handler.
+//
+// From one of name's own tasks, call Unregister in a new goroutine and return:
+// it waits for that task too, which cannot stop until the call returns.
+func (r *QueueRunner) Unregister(ctx context.Context, name string) error {
+	// Removing the handler and canceling the waiting tasks is a single step
+	// under the queue lock, so a worker claims each task either before it, and
+	// the run is stopped below, or not at all. As in Cancel, the store writes
+	// are detached from ctx.
+	removeHandler := func() { r.registry.remove(name) }
+	inFlight := r.queue.cancelNamed(context.WithoutCancel(ctx), name, time.Now(), removeHandler)
+	if err := r.stopRuns(ctx, r.runsOf(inFlight...)); err != nil {
+		return fmt.Errorf("unregister timeout: %w", err)
+	}
+	return nil
+}
+
+// runsOf returns the run-state of each of ids still running.
+func (r *QueueRunner) runsOf(ids ...uuid.UUID) map[uuid.UUID]runState {
+	runs := make(map[uuid.UUID]runState, len(ids))
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+	for _, id := range ids {
+		if state, ok := r.running[id]; ok {
+			runs[id] = state
+		}
+	}
+	return runs
+}
+
+// stopRuns cancels runs and waits until each has stopped, its final status
+// recorded. If ctx is done first, it marks the runs still going CancelError and
+// returns ctx.Err().
+func (r *QueueRunner) stopRuns(ctx context.Context, runs map[uuid.UUID]runState) error {
+	for _, state := range runs {
+		state.cancel()
+	}
+	for _, state := range runs {
+		select {
+		case <-state.done:
+		case <-ctx.Done():
+			// Mark a run CancelError only while it is still running: if the
+			// worker recorded its final status first, that status stands.
+			for id := range runs {
+				_, _ = r.queue.transition(context.Background(), id, TaskStatusRunning, TaskStatusCancelError, time.Now())
+			}
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 var ErrUnsafeStop = errors.New("unsafe stop: some workers failed to shutdown")

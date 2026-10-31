@@ -34,7 +34,8 @@ because todo only preserves free-form text there.)
   "cancel timeout" wraps ctx.Err(), so a caller whose own ctx was canceled
   gets errors.Is(err, context.Canceled) and can read it as the task canceled.
   Add ErrCancelTimeout and ErrNotCancelable; decide whether a second Cancel
-  of a canceled task returns nil.
+  of a canceled task returns nil. Unregister's "unregister timeout" wraps
+  ctx.Err() the same way.
 - [ ] keep waiting tasks waiting on ShutDown
   nextTask looks for a waiting task before it checks ctx, so after ShutDown
   the workers claim every waiting task and run it on a canceled ctx, and it
@@ -47,7 +48,7 @@ because todo only preserves free-form text there.)
   the task's own result at the same moment: the last write wins. A task
   that returns nil on ctx.Done (the README's example) ends Complete or
   Canceled by timing. Let the worker write the one final status.
-- [ ] add Unregister to the runner
+- [x] add Unregister to the runner
   A task registered per entity (one per ifmrip job) stays registered after
   the entity is deleted, until restart. Decide what happens to its waiting
   tasks.
