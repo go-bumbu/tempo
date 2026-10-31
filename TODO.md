@@ -30,3 +30,56 @@ because todo only preserves free-form text there.)
 - [>] add display names to the tasks
 - [>] task-level retries / backoff
   Re-run a failed task N times.
+- [ ] give Cancel's errors sentinels
+  "cancel timeout" wraps ctx.Err(), so a caller whose own ctx was canceled
+  gets errors.Is(err, context.Canceled) and can read it as the task canceled.
+  Add ErrCancelTimeout and ErrNotCancelable; decide whether a second Cancel
+  of a canceled task returns nil.
+- [ ] keep waiting tasks waiting on ShutDown
+  nextTask looks for a waiting task before it checks ctx, so after ShutDown
+  the workers claim every waiting task and run it on a canceled ctx, and it
+  ends canceled. With dbqueue, a graceful restart leaves nothing to resume.
+
+# From the ifmrip jobs migration
+
+- [x] fix the race on a canceled task's final status
+  Cancel sets Canceled after a running task returns, while the worker sets
+  the task's own result at the same moment: the last write wins. A task
+  that returns nil on ctx.Done (the README's example) ends Complete or
+  Canceled by timing. Let the worker write the one final status.
+- [ ] add Unregister to the runner
+  A task registered per entity (one per ifmrip job) stays registered after
+  the entity is deleted, until restart. Decide what happens to its waiting
+  tasks.
+- [>] allow a time zone per schedule
+  schedule.Cfg.Location is server-wide. Add an optional Schedule.TimeZone,
+  stored by dbschedule; quartz already takes a zone per trigger. Only
+  needed if ifmrip's triggers follow each job's zone.
+- [ ] refuse or default a zero Parallelism and QueueSize
+  Parallelism 0 starts no worker, so nothing runs; QueueSize 0 makes every
+  enqueue fail with ErrQueueFull.
+- [x] log a canceled task's last lines on a live context
+  "task canceled", the error and a panic are appended on the task's own,
+  already canceled ctx, so a sink that honours ctx (a gorm one) drops
+  them. Use context.WithoutCancel.
+- [ ] document how to integrate tempo, for agents
+  An agent misread the API while sizing ifmrip's migration: it missed that
+  one task per entity gives one run per entity, and took the worker pool
+  for a drawback, not a resource cap. Add an AGENTS.md covering:
+  - [ ] integration patterns
+    A task per entity with the kind in the params, an entity's schedules
+    by task name, Parallelism as a resource cap, typed vs raw params.
+  - [ ] what each option guarantees
+    Singleton coalesces, an exclusion group queues, max parallelism caps
+    one name; none spans processes.
+  - [ ] traps of the pluggable interfaces
+    RetainOnly at startup deletes the logs of tasks tempo doesn't know, so
+    a sink that keeps its own history must not implement the cleaners;
+    RemoveTasks trims one history shared by all names; recovery runs
+    waiting tasks and fails running ones with no reason.
+  - [ ] cancel and shutdown
+    Return ctx.Err() to record Canceled; what ShutDown does to running and
+    waiting tasks; the zero values above.
+  - [ ] the scheduler's limits
+    One process per store, a server-wide zone, missed fires not replayed,
+    a coalesced fire is skipped.
