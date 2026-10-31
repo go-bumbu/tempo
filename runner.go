@@ -31,6 +31,10 @@ type QueueRunner struct {
 	stopChan  chan struct{}
 	wg        sync.WaitGroup
 
+	// running holds the run-state of each claimed task, from its claim until
+	// after its final status is recorded, so every task Cancel sees Running is
+	// one it can find here. Lock order: the queue lock, then runMu; never the
+	// reverse.
 	runMu   sync.Mutex
 	running map[uuid.UUID]runState
 	limiter *limiter
@@ -127,28 +131,27 @@ func (r *QueueRunner) StartBg() {
 			defer r.wg.Done()
 			for {
 				canClaim, release := r.buildClaim()
-				id, name, params, err := r.queue.NextTask(r.ctx, canClaim)
+				childCtx, taskCancel := context.WithCancel(r.ctx)
+				state := runState{cancel: taskCancel, done: make(chan struct{})}
+				// Record the cancelable run-state as part of the claim: nextTask
+				// calls register under the queue lock (see running).
+				register := func(id uuid.UUID) {
+					r.runMu.Lock()
+					r.running[id] = state
+					r.runMu.Unlock()
+				}
+				id, name, params, err := r.queue.nextTask(r.ctx, canClaim, register)
 				if err != nil {
+					taskCancel()
 					return
 				}
 
 				entry, ok := r.registry.lookup(name)
 				if !ok {
-					_ = r.queue.SetStatus(context.Background(), id, TaskStatusFailed, time.Time{}, time.Now())
-					release()
+					r.finishRun(id, state, release, TaskStatusFailed, time.Now())
 					continue
 				}
 
-				childCtx, taskCancel := context.WithCancel(r.ctx)
-				// Record the cancelable run-state before the "task started" log: a
-				// slow LogSink can park the worker in that log call while the queue
-				// already shows the task Running. A Cancel arriving in that window
-				// must find the task here, not see Running in the queue and wrongly
-				// report it absent from the runner.
-				done := make(chan struct{})
-				r.runMu.Lock()
-				r.running[id] = runState{cancel: taskCancel, done: done}
-				r.runMu.Unlock()
 				var taskLog *slog.Logger
 				if r.logSink != nil {
 					taskLog = slog.New(newSinkHandler(r.logSink, r.logLevel, id))
@@ -161,42 +164,61 @@ func (r *QueueRunner) StartBg() {
 				} else {
 					taskProg = discardProgress
 				}
-				r.appendTaskLog(childCtx, id, "INFO", "task started")
+				// The runner's own lines about the run go out on a ctx detached from
+				// childCtx, which Cancel or ShutDown may cancel at any point from the
+				// claim on, so a sink honouring ctx keeps them.
+				logCtx := context.WithoutCancel(childCtx)
+				r.appendTaskLog(logCtx, id, "INFO", "task started")
 
-				var finalStatus TaskStatus
+				// A task that ends its goroutine instead of returning
+				// (runtime.Goexit, as t.FailNow does) gives no result: it fails.
+				finalStatus := TaskStatusFailed
 				var finalEndedAt time.Time
 				func() {
+					// Deferred, so the run is retired even if the task never returns.
 					defer func() {
-						taskCancel()
-						close(done)
-						r.runMu.Lock()
-						delete(r.running, id)
-						r.runMu.Unlock()
-						release()
+						if finalEndedAt.IsZero() {
+							finalEndedAt = time.Now()
+						}
+						r.finishRun(id, state, release, finalStatus, finalEndedAt)
+					}()
+					defer func() {
 						if recVal := recover(); recVal != nil {
 							finalStatus = TaskStatusPanicked
 							finalEndedAt = time.Now()
-							r.appendTaskLog(childCtx, id, "ERROR", fmt.Sprint(recVal))
+							r.appendTaskLog(logCtx, id, "ERROR", fmt.Sprint(recVal))
 						}
 					}()
 					taskErr := entry.run(childCtx, taskLog, taskProg, params)
 					finalEndedAt = time.Now()
 					if taskErr == nil {
 						finalStatus = TaskStatusComplete
-						r.appendTaskLog(childCtx, id, "INFO", "task finished")
+						r.appendTaskLog(logCtx, id, "INFO", "task finished")
 					} else if errors.Is(taskErr, context.Canceled) {
 						finalStatus = TaskStatusCanceled
-						r.appendTaskLog(childCtx, id, "INFO", "task canceled")
+						r.appendTaskLog(logCtx, id, "INFO", "task canceled")
 					} else {
 						finalStatus = TaskStatusFailed
-						r.appendTaskLog(childCtx, id, "ERROR", taskErr.Error())
+						r.appendTaskLog(logCtx, id, "ERROR", taskErr.Error())
 					}
 				}()
-
-				_ = r.queue.SetStatus(context.Background(), id, finalStatus, time.Time{}, finalEndedAt)
 			}
 		}()
 	}
+}
+
+// finishRun records a claimed task's final status, then retires its run-state
+// and frees its claim. The worker is the only writer of that status and closes
+// done only once it is recorded, so a Cancel that found the run and waits on
+// done returns with the status in place, and never writes one of its own.
+func (r *QueueRunner) finishRun(id uuid.UUID, state runState, release func(), status TaskStatus, endedAt time.Time) {
+	_ = r.queue.SetStatus(context.Background(), id, status, time.Time{}, endedAt)
+	state.cancel()
+	r.runMu.Lock()
+	delete(r.running, id)
+	r.runMu.Unlock()
+	close(state.done)
+	release()
 }
 
 // appendTaskLog sends a log line to the sink when configured; errors are ignored.
@@ -278,8 +300,25 @@ func (r *QueueRunner) GetTask(id uuid.UUID) (TaskInfo, error) {
 	return r.queue.Get(context.Background(), id)
 }
 
-// Cancel cancels a waiting or running task.
+// Cancel cancels a waiting or running task. A waiting task is marked Canceled.
+// A running task has its ctx canceled, and Cancel returns once it has stopped,
+// with the status the task's return value gives, as on ShutDown: ctx.Err()
+// records Canceled, nil Complete, another error Failed, and a panic Panicked.
+// If ctx is done first, Cancel returns an error and the task shows CancelError
+// until it stops.
 func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
+	// Canceling a waiting task is a single step under the queue lock, so it
+	// cannot race a worker claiming it: once claimed, the run is canceled below.
+	// Its store write is detached from ctx: once the queue holds Canceled, a
+	// write failed by a done ctx would bring the task back after a restart.
+	canceled, err := r.queue.transition(context.WithoutCancel(ctx), id, TaskStatusWaiting, TaskStatusCanceled, time.Now())
+	if err != nil {
+		return err
+	}
+	if canceled {
+		return nil
+	}
+
 	r.runMu.Lock()
 	state, running := r.running[id]
 	r.runMu.Unlock()
@@ -288,10 +327,11 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 		state.cancel()
 		select {
 		case <-state.done:
-			_ = r.queue.SetStatus(context.Background(), id, TaskStatusCanceled, time.Time{}, time.Now())
 			return nil
 		case <-ctx.Done():
-			_ = r.queue.SetStatus(context.Background(), id, TaskStatusCancelError, time.Time{}, time.Now())
+			// Mark the run CancelError only while it is still running: if the
+			// worker recorded its final status first, that status stands.
+			_, _ = r.queue.transition(context.Background(), id, TaskStatusRunning, TaskStatusCancelError, time.Now())
 			return fmt.Errorf("cancel timeout: %w", ctx.Err())
 		}
 	}
@@ -299,12 +339,6 @@ func (r *QueueRunner) Cancel(ctx context.Context, id uuid.UUID) error {
 	info, err := r.queue.Get(ctx, id)
 	if err != nil {
 		return err
-	}
-	if info.Status == TaskStatusWaiting {
-		return r.queue.SetStatus(ctx, id, TaskStatusCanceled, time.Time{}, time.Now())
-	}
-	if info.Status == TaskStatusRunning {
-		return fmt.Errorf("task %s not found in runner", id)
 	}
 	return fmt.Errorf("task not cancelable: status %s", info.Status.Str())
 }

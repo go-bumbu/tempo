@@ -25,8 +25,9 @@ func WithMaxParallelism(n int) TaskOption {
 }
 
 // WithSingleton makes a task coalesce on enqueue: while an instance of this task
-// name is already waiting or running, enqueuing it again enqueues nothing and
-// returns the in-flight task's id. Unlike WithMaxParallelism(1) — which lets
+// name is already waiting or running (cancel_error included: still running after
+// a Cancel timed out), enqueuing it again enqueues nothing and returns the
+// in-flight task's id. Unlike WithMaxParallelism(1) — which lets
 // duplicates pile up as waiting and only serializes their execution —
 // WithSingleton keeps at most one instance in the queue at all. Dedup is by task
 // name, within a single process.

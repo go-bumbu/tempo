@@ -3,9 +3,10 @@
 // package so that gorm is not a dependency of anyone who does not need it.
 //
 // Because it implements List, a runner configured with a dbqueue store recovers
-// its tasks after a restart: waiting tasks run, and tasks left Running by a
-// crash are reconciled to Failed by the core (see tempo's recoverTasks). The
-// default in-memory persistence has no List and so recovers nothing.
+// its tasks after a restart: waiting tasks run, and tasks a crash left Running
+// (or CancelError, still running after a timed-out Cancel) are reconciled to
+// Failed by the core (see tempo's recoverTasks). The default in-memory
+// persistence has no List and so recovers nothing.
 package dbqueue
 
 import (

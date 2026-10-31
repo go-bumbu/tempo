@@ -160,10 +160,10 @@ func NewTaskQueue(cfg TaskQueueCfg) *TaskQueue {
 }
 
 // recoverTasks loads any persisted tasks into the queue (e.g. after a restart).
-// A task persisted as Running was in-flight when the process died; no worker
-// owns it now. NextTask only claims Waiting tasks and CleanHistory only trims
-// terminal ones, so leaving it Running orphans it forever — it is recovered as
-// Failed (terminal) instead.
+// A task persisted as Running, or as CancelError (a run a Cancel timed out on),
+// was in-flight when the process died; no worker owns it now. NextTask only
+// claims Waiting tasks and CleanHistory only trims terminal ones, so leaving it
+// as is orphans it forever — it is recovered as Failed (terminal) instead.
 func (q *TaskQueue) recoverTasks(p TaskStatePersistence) {
 	r, ok := p.(RecoverablePersistence)
 	if !ok {
@@ -183,7 +183,7 @@ func (q *TaskQueue) recoverTasks(p TaskStatePersistence) {
 			endedAt:   info.EndedAt,
 			params:    info.Params,
 		}
-		if rec.status == TaskStatusRunning {
+		if rec.status == TaskStatusRunning || rec.status == TaskStatusCancelError {
 			rec.status = TaskStatusFailed
 			if rec.endedAt.IsZero() {
 				rec.endedAt = time.Now()
@@ -201,16 +201,17 @@ func (q *TaskQueue) Add(name string, params []byte) (uuid.UUID, error) {
 	return q.addLocked(name, params)
 }
 
-// AddUnique enqueues name unless a task with the same name is already Waiting or
-// Running, in which case it enqueues nothing and returns (that task's id, true).
-// A fresh insert returns (new id, false). The bool lets callers distinguish a
-// coalesced duplicate from a new enqueue. A coalesced return never yields
-// ErrQueueFull (it adds nothing); only a genuine new insert can.
+// AddUnique enqueues name unless a task with the same name is already Waiting,
+// Running or CancelError (still running after a Cancel timed out), in which case
+// it enqueues nothing and returns (that task's id, true). A fresh insert returns
+// (new id, false). The bool lets callers distinguish a coalesced duplicate from
+// a new enqueue. A coalesced return never yields ErrQueueFull (it adds nothing);
+// only a genuine new insert can.
 func (q *TaskQueue) AddUnique(name string, params []byte) (uuid.UUID, bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, t := range q.tasks {
-		if t.name == name && (t.status == TaskStatusWaiting || t.status == TaskStatusRunning) {
+		if t.name == name && (t.status == TaskStatusWaiting || t.status == TaskStatusRunning || t.status == TaskStatusCancelError) {
 			return t.id, true, nil
 		}
 	}
@@ -243,6 +244,13 @@ func (q *TaskQueue) addLocked(name string, params []byte) (uuid.UUID, error) {
 // atomically marking it Running. Blocks until an eligible task exists or ctx
 // is done. canClaim filters by task name.
 func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) bool) (uuid.UUID, string, []byte, error) {
+	return q.nextTask(ctx, canClaim, nil)
+}
+
+// nextTask is NextTask with an onClaim hook, called with the claimed task's id
+// while q.mu is still held: what it records is in place before anyone else can
+// see the task Running.
+func (q *TaskQueue) nextTask(ctx context.Context, canClaim func(name string) bool, onClaim func(id uuid.UUID)) (uuid.UUID, string, []byte, error) {
 	// Wake a parked cond.Wait when ctx is canceled. The callback takes q.mu
 	// before broadcasting, so it cannot fire in the gap between the ctx.Err()
 	// check below and cond.Wait (which atomically releases q.mu): no lost wakeup.
@@ -266,6 +274,9 @@ func (q *TaskQueue) NextTask(ctx context.Context, canClaim func(name string) boo
 			t.startedAt = time.Now()
 			_ = q.persist.SaveTask(context.Background(), q.recordToInfo(t))
 			id, name, params := t.id, t.name, t.params
+			if onClaim != nil {
+				onClaim(id)
+			}
 			q.mu.Unlock()
 			return id, name, params, nil
 		}
@@ -321,6 +332,30 @@ func (q *TaskQueue) SetStatus(ctx context.Context, id uuid.UUID, status TaskStat
 		}
 	}
 	return ErrTaskNotFound
+}
+
+// transition moves the task from status `from` to `to`, also setting endedAt
+// when it is not zero, and reports whether it did: it changes nothing once the
+// task has left `from`. Unlike SetStatus it cannot overwrite a status another
+// goroutine wrote after the caller last looked.
+func (q *TaskQueue) transition(ctx context.Context, id uuid.UUID, from, to TaskStatus, endedAt time.Time) (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, t := range q.tasks {
+		if t.id != id {
+			continue
+		}
+		if t.status != from {
+			return false, nil
+		}
+		t.status = to
+		if !endedAt.IsZero() {
+			t.endedAt = endedAt
+		}
+		_ = q.persist.SaveTask(ctx, q.recordToInfo(t))
+		return true, nil
+	}
+	return false, ErrTaskNotFound
 }
 
 // CleanHistory removes old terminal tasks so that at most maxDone remain, and

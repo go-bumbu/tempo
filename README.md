@@ -84,15 +84,17 @@ runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
 ```
 
 On startup the runner reloads persisted tasks: a task still **waiting** when the
-process died resumes and runs, while one caught **running** is reconciled to
+process died resumes and runs, while one caught **running** (or in
+**cancel_error**, still running after a timed-out `Cancel`) is reconciled to
 **failed** — no worker owns it, and re-running could repeat side effects. The
 in-memory persistence has no `List`, so it recovers nothing.
 
 ## Singleton tasks
 
 Register a task with `tempo.WithSingleton()` to keep at most one instance of it
-in the queue. While an instance is **waiting or running**, enqueuing that task
-again — via `Enqueue`, `AddRaw`, or a schedule fire — adds nothing and returns
+in the queue. While an instance is **waiting or running** (including
+**cancel_error**, a run still stopping after a timed-out `Cancel`), enqueuing that
+task again — via `Enqueue`, `AddRaw`, or a schedule fire — adds nothing and returns
 `(that task's id, true, nil)`; once it reaches a terminal state, the next
 enqueue starts a fresh one and returns `(new id, false, nil)`. The `coalesced`
 bool lets a caller tell a coalesced duplicate from a fresh enqueue; `error`
@@ -282,9 +284,9 @@ every one, since `Set` runs synchronously on the worker.
 
 ## How To
 
-### Handle Shutdown in Long-Running Tasks
+### Handle Cancellation and Shutdown in Long-Running Tasks
 
-For long-running tasks, check the context to respond to shutdown signals and allow for clean termination:
+For long-running tasks, check the context to respond to `Cancel` and `ShutDown` and allow for clean termination:
 
 ```go
 myTask := func(ctx context.Context) error {
@@ -294,9 +296,9 @@ myTask := func(ctx context.Context) error {
     for {
         select {
         case <-ctx.Done():
-            fmt.Println("Shutdown received, cleaning up...")
+            fmt.Println("Cancel or shutdown received, cleaning up...")
             cleanup()
-            return nil
+            return ctx.Err()
             
         case <-ticker.C:
             // Do periodic work
@@ -305,6 +307,13 @@ myTask := func(ctx context.Context) error {
     }
 }
 ```
+
+The value a task returns decides its final status, whoever stopped it:
+`ctx.Err()` (or an error wrapping it) records **canceled**, `nil` records
+**complete**, any other error records **failed**, and a panic records
+**panicked**. `Cancel` returns once a running task has stopped, with that status
+already recorded; if its own context expires first, it returns an error and the
+task shows **cancel_error** until it stops.
 
 ### Query Task Status
 

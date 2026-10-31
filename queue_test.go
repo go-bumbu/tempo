@@ -168,10 +168,11 @@ func TestQueueAddUnique(t *testing.T) {
 		}
 	})
 
-	t.Run("creates a new task when the previous one is in cancel-error state", func(t *testing.T) {
-		// CancelError is neither Waiting nor Running, and CleanHistory never trims
-		// it (not in TaskTerminalStatus), so it must not hold the singleton slot —
-		// otherwise the task could never be enqueued again.
+	t.Run("coalesces onto a task in cancel-error state", func(t *testing.T) {
+		// CancelError marks a run still going after a Cancel timed out: the
+		// worker replaces it with the run's final status once the run returns,
+		// and recovery turns it into Failed. A second instance enqueued meanwhile
+		// would run alongside it.
 		tq := newTestQueue(10)
 		id1, _, err := tq.AddUnique("scan", nil)
 		if err != nil {
@@ -184,11 +185,15 @@ func TestQueueAddUnique(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AddUnique after cancel-error: %v", err)
 		}
-		if coalesced2 {
-			t.Errorf("AddUnique after cancel-error: got coalesced true, want false (new task)")
+		if !coalesced2 {
+			t.Errorf("AddUnique after cancel-error: got coalesced false, want true")
 		}
-		if id2 == id1 {
-			t.Errorf("cancel-error task held the singleton slot; expected a new id, got %v", id1)
+		if id2 != id1 {
+			t.Errorf("coalesce onto cancel-error: got %v want %v", id2, id1)
+		}
+		list, _ := tq.List(ctx)
+		if len(list) != 1 {
+			t.Fatalf("task count: got %d want 1", len(list))
 		}
 	})
 
@@ -795,6 +800,39 @@ func TestQueueRecoveryMarksInFlightRunningAsFailed(t *testing.T) {
 	}
 	if info.Status != TaskStatusFailed {
 		t.Errorf("recovered in-flight task: got status %s, want failed (it is otherwise orphaned)", info.Status.Str())
+	}
+}
+
+// TestQueueRecoveryMarksCancelErrorAsFailed guards recovery of a task persisted
+// as cancel_error: a Cancel timed out on it, so it was still running when the
+// process died. Like a recovered Running task nothing owns it now, and as
+// cancel_error is not terminal, CleanHistory would otherwise keep it forever.
+func TestQueueRecoveryMarksCancelErrorAsFailed(t *testing.T) {
+	ctx := context.Background()
+	persist := newRecoverableMemPersistence()
+	id := uuid.New()
+	if err := persist.SaveTask(ctx, TaskInfo{
+		ID:        id,
+		Name:      "scan",
+		Status:    TaskStatusCancelError,
+		QueuedAt:  time.Now(),
+		StartedAt: time.Now(),
+		EndedAt:   time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tq := NewTaskQueue(TaskQueueCfg{QueueSize: 10, HistorySize: 10, Persistence: persist})
+	info, err := tq.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after recovery: %v", err)
+	}
+	if info.Status != TaskStatusFailed {
+		t.Errorf("recovered cancel-error task: got status %s, want failed", info.Status.Str())
+	}
+	stored, _ := persist.List(ctx)
+	if len(stored) != 1 || stored[0].Status != TaskStatusFailed {
+		t.Errorf("persisted after recovery: got %+v, want the task stored as failed", stored)
 	}
 }
 
