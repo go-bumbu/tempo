@@ -48,9 +48,13 @@ type runState struct {
 
 // RunnerCfg holds configuration for the queue runner.
 type RunnerCfg struct {
-	Parallelism  int
-	QueueSize    int
-	HistorySize  int
+	// Parallelism is the number of workers: the most tasks running at once, all names together. Must be at least 1.
+	Parallelism int
+	// QueueSize is the most tasks waiting at once; an enqueue beyond it returns ErrQueueFull. Must be at least 1.
+	QueueSize int
+	// HistorySize is how many finished tasks are kept, all names together. Zero or less means 10.
+	HistorySize int
+	// CleanupTimer is how often the history is trimmed. Zero or less means 5 minutes.
 	CleanupTimer time.Duration
 	// Persistence mirrors task state; must not be nil.
 	Persistence TaskStatePersistence
@@ -62,16 +66,22 @@ type RunnerCfg struct {
 	ProgressSink TaskProgressSink
 }
 
-// NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterRaw or Register to add task definitions. cfg.Persistence must not be nil.
+// NewQueueRunner creates a QueueRunner with an internal queue built from cfg. Use RegisterRaw or Register to add task definitions. It returns an error when cfg.Persistence is nil, or when cfg.Parallelism or cfg.QueueSize is below 1.
 func NewQueueRunner(cfg RunnerCfg) (*QueueRunner, error) {
 	if cfg.Persistence == nil {
 		return nil, errors.New("tempo: persistence must not be nil")
 	}
+	if cfg.Parallelism < 1 {
+		return nil, fmt.Errorf("tempo: parallelism must be at least 1, got %d", cfg.Parallelism)
+	}
+	if cfg.QueueSize < 1 {
+		return nil, fmt.Errorf("tempo: queue size must be at least 1, got %d", cfg.QueueSize)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	if cfg.CleanupTimer == 0 {
+	if cfg.CleanupTimer <= 0 {
 		cfg.CleanupTimer = 5 * time.Minute
 	}
-	if cfg.HistorySize == 0 {
+	if cfg.HistorySize <= 0 {
 		cfg.HistorySize = 10
 	}
 	queueCfg := TaskQueueCfg{

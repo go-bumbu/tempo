@@ -121,10 +121,9 @@ if err := runner.ShutDown(shutdownCtx); err != nil {
 
 ## Zero-value configuration
 
-Neither value is validated (tracked in `TODO.md`):
-
-- `Parallelism: 0` starts no worker. Every task stays `waiting` forever.
-- `QueueSize: 0` makes every enqueue return `ErrQueueFull`.
+`Parallelism` and `QueueSize` have no default: `NewQueueRunner` returns an
+error when either is below 1, so set both.
 
 The other zero values have defaults: `HistorySize` 10, `CleanupTimer` 5
-minutes, `LogLevel` `slog.LevelInfo`.
+minutes, `LogLevel` `slog.LevelInfo`. A negative `HistorySize` or
+`CleanupTimer` gets the same default.

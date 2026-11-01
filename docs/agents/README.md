@@ -25,8 +25,8 @@ page and the code disagree, the code wins: fix the page.
 2. **`Parallelism` is the resource cap**: the most tasks running at once across
    the whole runner. Extra tasks wait in the queue; that is the design, not a
    limitation to engineer around. `QueueSize` caps how many may wait.
-3. **Zero values are not defaulted.** `Parallelism: 0` starts no worker, so
-   nothing ever runs; `QueueSize: 0` rejects every enqueue with `ErrQueueFull`.
+3. **`Parallelism` and `QueueSize` are required.** `NewQueueRunner` returns an
+   error when either is below 1; there is no default to fall back on.
 4. **Register every handler before `StartBg`.** Tasks recovered from a durable
    store are claimed as soon as the workers start, and a task whose name has no
    handler at that moment fails.

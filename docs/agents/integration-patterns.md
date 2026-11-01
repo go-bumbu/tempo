@@ -163,7 +163,8 @@ run at a time.
 
 - [ ] Persistence chosen: `dbqueue` if waiting tasks must survive a restart.
 - [ ] Every handler, per-entity ones included, registered before `StartBg`.
-- [ ] `Parallelism >= 1`, and `QueueSize` sized for the largest burst.
+- [ ] `Parallelism` sized as the budget for background work, and `QueueSize`
+      for the largest burst.
 - [ ] Handlers watch `ctx` and return `ctx.Err()` when it ends.
 - [ ] A `LogSink` configured if anyone needs to know why a task failed.
 - [ ] One process per `tempo_tasks` table, log directory and

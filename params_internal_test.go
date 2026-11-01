@@ -7,7 +7,7 @@ import (
 )
 
 func TestWithExclusionGroupStoresGroup(t *testing.T) {
-	r, err := NewQueueRunner(RunnerCfg{Parallelism: 1, Persistence: NewMemPersistence()})
+	r, err := NewQueueRunner(RunnerCfg{Parallelism: 1, QueueSize: 1, Persistence: NewMemPersistence()})
 	if err != nil {
 		t.Fatal(err)
 	}

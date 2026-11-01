@@ -141,8 +141,8 @@ type TaskInfo struct {
 
 | `RunnerCfg` field | Meaning | Zero value |
 |---|---|---|
-| `Parallelism` | Worker goroutines: the most tasks running at once, all names together. | **Starts no worker; every task waits forever.** Not validated. |
-| `QueueSize` | The most tasks waiting at once. An enqueue beyond it returns `ErrQueueFull`. | **Every enqueue returns `ErrQueueFull`.** Not validated. |
+| `Parallelism` | Worker goroutines: the most tasks running at once, all names together. | Required; below 1 is an error. |
+| `QueueSize` | The most tasks waiting at once. An enqueue beyond it returns `ErrQueueFull`. | Required; below 1 is an error. |
 | `HistorySize` | Terminal tasks kept, all names together. | 10 |
 | `CleanupTimer` | How often history is trimmed. | 5 minutes |
 | `Persistence` | Task state mirror. | Required; nil is an error. |

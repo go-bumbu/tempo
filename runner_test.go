@@ -37,6 +37,33 @@ func newTestRunner(cfg tempo.RunnerCfg) *tempo.QueueRunner {
 	return r
 }
 
+func TestNewQueueRunnerRefusesSizesBelowOne(t *testing.T) {
+	tcs := []struct {
+		name        string
+		parallelism int
+		queueSize   int
+		wantErr     bool
+	}{
+		{name: "zero parallelism", parallelism: 0, queueSize: 1, wantErr: true},
+		{name: "negative parallelism", parallelism: -1, queueSize: 1, wantErr: true},
+		{name: "zero queue size", parallelism: 1, queueSize: 0, wantErr: true},
+		{name: "negative queue size", parallelism: 1, queueSize: -1, wantErr: true},
+		{name: "smallest valid", parallelism: 1, queueSize: 1, wantErr: false},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+				Parallelism: tc.parallelism,
+				QueueSize:   tc.queueSize,
+				Persistence: tempo.NewMemPersistence(),
+			})
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Fatalf("NewQueueRunner() error = %v, want error: %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestTaskData(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {

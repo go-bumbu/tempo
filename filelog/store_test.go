@@ -192,7 +192,7 @@ func TestOrphanSweptWhenRunnerConstructed(t *testing.T) {
 	_ = s.Append(ctx, orphan, "INFO", "o")
 
 	_, err := tempo.NewQueueRunner(tempo.RunnerCfg{
-		QueueSize: 10, HistorySize: 10,
+		Parallelism: 1, QueueSize: 10, HistorySize: 10,
 		Persistence: &fakeRecoverable{list: []tempo.TaskInfo{{ID: keep, Name: "t", Status: tempo.TaskStatusComplete}}},
 		LogSink:     s,
 	})
