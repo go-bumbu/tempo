@@ -8,6 +8,34 @@ import (
 	"github.com/google/uuid"
 )
 
+// A non-positive CleanupTimer must not reach time.NewTicker, which panics on
+// it in the autoClean goroutine.
+func TestNewQueueRunnerCleanupTimer(t *testing.T) {
+	tcs := []struct {
+		name  string
+		timer time.Duration
+		want  time.Duration
+	}{
+		{name: "unset", timer: 0, want: 5 * time.Minute},
+		{name: "negative", timer: -time.Second, want: 5 * time.Minute},
+		{name: "set", timer: time.Minute, want: time.Minute},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := NewQueueRunner(RunnerCfg{
+				Parallelism: 1, QueueSize: 1, CleanupTimer: tc.timer,
+				Persistence: NewMemPersistence(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.cleanupTimer != tc.want {
+				t.Errorf("cleanupTimer = %v, want %v", r.cleanupTimer, tc.want)
+			}
+		})
+	}
+}
+
 // fakeCleaner is a TaskLogSink that also records cleanup calls.
 type fakeCleaner struct {
 	appended int
@@ -59,7 +87,7 @@ func TestRetainOnlyAtConstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := NewQueueRunner(RunnerCfg{
-		QueueSize: 10, HistorySize: 10,
+		Parallelism: 1, QueueSize: 10, HistorySize: 10,
 		Persistence: persist,
 		LogSink:     fc,
 	})
@@ -74,7 +102,7 @@ func TestRetainOnlyAtConstruction(t *testing.T) {
 func TestRetainOnlyEmptyUnderMemPersistence(t *testing.T) {
 	fc := &fakeCleaner{}
 	_, err := NewQueueRunner(RunnerCfg{
-		QueueSize: 10, HistorySize: 10,
+		Parallelism: 1, QueueSize: 10, HistorySize: 10,
 		Persistence: NewMemPersistence(),
 		LogSink:     fc,
 	})
@@ -90,7 +118,7 @@ func TestCleanupOnceForwardsRemovedIDs(t *testing.T) {
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	fc := &fakeCleaner{}
 	r, err := NewQueueRunner(RunnerCfg{
-		QueueSize: 10, HistorySize: 1, // keep 1 of 3 terminal -> remove 2
+		Parallelism: 1, QueueSize: 10, HistorySize: 1, // keep 1 of 3 terminal -> remove 2
 		Persistence: &fakeRecoverable{list: []TaskInfo{term(a), term(b), term(c)}},
 		LogSink:     fc,
 	})
@@ -127,7 +155,7 @@ func TestProgressRetainOnlyAtConstruction(t *testing.T) {
 	a, b := uuid.New(), uuid.New()
 	fpc := &fakeProgressCleaner{}
 	_, err := NewQueueRunner(RunnerCfg{
-		QueueSize: 10, HistorySize: 10,
+		Parallelism: 1, QueueSize: 10, HistorySize: 10,
 		Persistence:  &fakeRecoverable{list: []TaskInfo{term(a), term(b)}},
 		ProgressSink: fpc,
 	})
@@ -142,7 +170,7 @@ func TestProgressRetainOnlyAtConstruction(t *testing.T) {
 func TestProgressRetainOnlyEmptyUnderMemPersistence(t *testing.T) {
 	fpc := &fakeProgressCleaner{}
 	_, err := NewQueueRunner(RunnerCfg{
-		QueueSize: 10, HistorySize: 10,
+		Parallelism: 1, QueueSize: 10, HistorySize: 10,
 		Persistence:  NewMemPersistence(),
 		ProgressSink: fpc,
 	})
@@ -158,7 +186,7 @@ func TestProgressCleanupOnceForwardsRemovedIDs(t *testing.T) {
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	fpc := &fakeProgressCleaner{}
 	r, err := NewQueueRunner(RunnerCfg{
-		QueueSize: 10, HistorySize: 1, // keep 1 of 3 terminal -> remove 2
+		Parallelism: 1, QueueSize: 10, HistorySize: 1, // keep 1 of 3 terminal -> remove 2
 		Persistence:  &fakeRecoverable{list: []TaskInfo{term(a), term(b), term(c)}},
 		ProgressSink: fpc,
 	})

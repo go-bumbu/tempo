@@ -61,7 +61,7 @@ because todo only preserves free-form text there.)
   than its jobs sets it once. Add an optional Schedule.TimeZone, stored by
   dbschedule (quartz already takes a zone per trigger), only if one store
   must hold rules in different zones.
-- [ ] refuse or default a zero Parallelism and QueueSize
+- [x] refuse or default a zero Parallelism and QueueSize
   Parallelism 0 starts no worker, so nothing runs; QueueSize 0 makes every
   enqueue fail with ErrQueueFull.
 - [x] log a canceled task's last lines on a live context
