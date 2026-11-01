@@ -1,15 +1,55 @@
 # Tempo
 
-Tempo is a lightweight background job runner and task queue library for Go. It provides a simple API to manage concurrent task execution with built-in support for graceful shutdown and task lifecycle management.
+Tempo is a lightweight background job runner for Go that runs inside your
+process. You register named task handlers, enqueue tasks with typed or raw JSON
+parameters, and a bounded pool of workers runs them. Tempo tracks every task's
+status, lets you cancel tasks and shut down gracefully, and offers optional
+durable state, per-task logs, progress reporting and cron scheduling.
 
-## Features
+## Capabilities
 
-- **Task Queue Management** - Add tasks to a queue with configurable maximum size
-- **Parallelism Control** - Limit the number of concurrent task executions
-- **Task Status Tracking** - Query task status (waiting, running, complete, failed, panicked, canceled)
-- **Task Cancellation** - Cancel running or pending tasks with timeout support
-- **Graceful Shutdown** - Clean shutdown that waits for running tasks to complete
-- **Task History** - Automatic cleanup of completed task history with configurable retention
+- **Bounded worker pool and queue.** `Parallelism` caps how many tasks run at
+  once; `QueueSize` caps how many may wait.
+- **Typed or raw parameters.** `Register` and `Enqueue` move a Go type as JSON;
+  `RegisterRaw` and `AddRaw` take bytes, for example straight from an HTTP
+  request.
+- **Task lifecycle.** Each task is tracked as waiting, running, complete,
+  failed, panicked, canceled or cancel_error. A bounded history of finished
+  tasks is kept and trimmed automatically.
+- **Cancel, unregister, shut down.** Cancel a single task, remove a handler
+  along with its tasks, or stop the runner and wait for running tasks to
+  return.
+- **Per-task concurrency rules.** Cap a task's concurrent runs
+  (`WithMaxParallelism`), drop duplicate enqueues while one is in flight
+  (`WithSingleton`), or keep different tasks from running at the same time
+  (`WithExclusionGroup`).
+- **Persistence and crash recovery.** Task state lives in memory or in SQL
+  (`dbqueue`). After a restart, waiting tasks resume and tasks that were
+  interrupted are marked failed.
+- **Per-task logs.** Each handler gets a `*slog.Logger` whose lines go to a
+  pluggable sink: in memory, or one JSON Lines file per task (`filelog`). Logs
+  are removed along with their task.
+- **Progress reporting.** Handlers report done, total and stage to a pluggable
+  sink; percentage and ETA are derived when read.
+- **Cron scheduling.** `schedule` enqueues tasks on 5- or 6-field cron
+  expressions. Schedules can be edited at runtime and are stored in memory or
+  in SQL (`dbschedule`).
+
+Everything runs in one process: the limits, dedup and schedules do not
+coordinate with other processes sharing a database.
+
+## Packages
+
+| Package | Provides |
+|---|---|
+| `github.com/go-bumbu/tempo` | Runner, queue, task options, in-memory persistence, log and progress sinks |
+| `github.com/go-bumbu/tempo/schedule` | Cron scheduler and an in-memory schedule store |
+| `github.com/go-bumbu/tempo/dbqueue` | SQL task persistence with crash recovery (gorm) |
+| `github.com/go-bumbu/tempo/dbschedule` | SQL schedule store (gorm) |
+| `github.com/go-bumbu/tempo/filelog` | On-disk task log sink |
+
+Only `dbqueue` and `dbschedule` import gorm, and only `schedule` imports
+go-quartz; the core package needs neither.
 
 ## Installation
 
@@ -17,344 +57,70 @@ Tempo is a lightweight background job runner and task queue library for Go. It p
 go get github.com/go-bumbu/tempo
 ```
 
-## Quick Start
+## Quick start
 
 ```go
-runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
-    Parallelism: 2, QueueSize: 10, HistorySize: 10,
-    Persistence: tempo.NewMemPersistence(),
-})
-if err != nil {
-    panic(err)
-}
+package main
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/go-bumbu/tempo"
+)
 
 type ScanParams struct {
-    Mode string `json:"mode"` // "normal" | "full"
+	Mode string `json:"mode"` // "normal" or "full"
 }
 
-// register a typed task
-tempo.Register(runner, "scan", func(ctx context.Context, log *slog.Logger, p ScanParams) error {
-    fmt.Printf("scan mode=%s\n", p.Mode)
-    return nil
-})
+func main() {
+	runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
+		Parallelism: 2,                         // tasks running at once
+		QueueSize:   10,                        // tasks waiting at once
+		Persistence: tempo.NewMemPersistence(), // required; dbqueue for durable state
+	})
+	if err != nil {
+		panic(err)
+	}
 
-runner.StartBg()
+	// Register handlers before starting the workers.
+	tempo.Register(runner, "scan", func(ctx context.Context, log *slog.Logger, prog tempo.Progress, p ScanParams) error {
+		log.Info("scanning", "mode", p.Mode)
+		return nil
+	})
 
-// enqueue with typed params
-if _, _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
-    panic(err)
-}
+	runner.StartBg()
 
-// or enqueue by name with a raw JSON payload (e.g. from an HTTP handler)
-if _, _, err := runner.AddRaw("scan", []byte(`{"mode":"normal"}`)); err != nil {
-    panic(err)
-}
+	// Enqueue with typed params...
+	if _, _, err := tempo.Enqueue(runner, "scan", ScanParams{Mode: "full"}); err != nil {
+		panic(err)
+	}
+	// ...or by name with raw JSON, e.g. from an HTTP handler.
+	if _, _, err := runner.AddRaw("scan", []byte(`{"mode":"normal"}`)); err != nil {
+		panic(err)
+	}
 
-if err := runner.ShutDown(context.TODO()); err != nil {
-    panic(err)
-}
-```
-
-## Configuration
-
-```go
-tempo.RunnerCfg{
-    Parallelism:  4,              // Number of concurrent workers (required)
-    QueueSize:    100,            // Maximum pending tasks in queue
-    HistorySize:  50,             // Number of completed tasks to retain
-    CleanupTimer: 5 * time.Minute, // Interval for history cleanup (default: 5min)
-}
-```
-
-## Persistence
-
-By default task state is kept in memory (`tempo.NewMemPersistence()`) and is lost
-on restart. For durable state, pass a `dbqueue` store — a gorm-backed
-`RecoverablePersistence`, kept out of the core package so gorm is not forced on
-callers who do not need it:
-
-```go
-store, err := dbqueue.New(db) // AutoMigrates the tempo_tasks table
-if err != nil {
-    panic(err)
-}
-runner, err := tempo.NewQueueRunner(tempo.RunnerCfg{
-    Parallelism: 2, QueueSize: 10, Persistence: store,
-})
-```
-
-On startup the runner reloads persisted tasks: a task still **waiting** when the
-process died resumes and runs, while one caught **running** (or in
-**cancel_error**, still running after a timed-out `Cancel` or `Unregister`) is
-reconciled to **failed** — no worker owns it, and re-running could repeat side
-effects. The in-memory persistence has no `List`, so it recovers nothing.
-
-## Singleton tasks
-
-Register a task with `tempo.WithSingleton()` to keep at most one instance of it
-in the queue. While an instance is **waiting or running** (including
-**cancel_error**, a run still stopping after a timed-out `Cancel` or
-`Unregister`), enqueuing that task again — via `Enqueue`, `AddRaw`, or a
-schedule fire — adds nothing and returns `(that task's id, true, nil)`; once it
-reaches a terminal state, the next
-enqueue starts a fresh one and returns `(new id, false, nil)`. The `coalesced`
-bool lets a caller tell a coalesced duplicate from a fresh enqueue; `error`
-stays reserved for genuine failures such as `ErrQueueFull`.
-
-```go
-tempo.Register(runner, "reindex", reindex, tempo.WithSingleton())
-
-id, coalesced, err := runner.AddRaw("reindex", nil)
-if err != nil {
-    panic(err) // real failure, e.g. ErrQueueFull
-}
-if coalesced {
-    fmt.Printf("reindex already queued or running as %s\n", id)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := runner.ShutDown(ctx); err != nil {
+		panic(err)
+	}
 }
 ```
 
-This differs from `WithMaxParallelism(1)`: that lets duplicates pile up as
-waiting and only serializes their execution, whereas `WithSingleton` never
-queues a duplicate in the first place. Dedup is by **task name** and within a
-single process; it does not coordinate across processes sharing a database.
+## Documentation
 
-## Exclusion groups
+- [`docs/agents/`](docs/agents/README.md): the full usage guide, covering
+  concepts, integration patterns, what each option guarantees, cancellation and
+  shutdown, persistence and sinks, and scheduling. It is written for coding
+  agents and reads just as well for people.
+- Runnable examples in `example_test.go`, `example_stream_test.go`,
+  `example_progress_test.go`, `filelog/example_test.go` and
+  `schedule/example_test.go`, also on
+  [pkg.go.dev](https://pkg.go.dev/github.com/go-bumbu/tempo).
+- [AGENTS.md](AGENTS.md): guidance for agents working on tempo itself.
 
-Some tasks must not run at the same time as each other — a `scan` and a
-`reindex` over the same files, say. Register each with the same
-`tempo.WithExclusionGroup(name)` and the runner lets at most one task in that
-group run at a time, across all task names in it:
+## License
 
-```go
-tempo.Register(runner, "scan", scan, tempo.WithExclusionGroup("files"))
-tempo.Register(runner, "reindex", reindex, tempo.WithExclusionGroup("files"))
-```
-
-While a group member runs, another member stays waiting and is claimed as soon
-as the group frees; tasks outside the group (or in a different group) are
-unaffected and keep running in parallel. A group-blocked task does not hold up
-the queue — workers skip it and run other eligible tasks meanwhile.
-
-How this differs from the other options:
-
-- `WithMaxParallelism(n)` caps concurrent instances of **one** task name.
-- `WithSingleton()` keeps at most one instance of **one** task name in the queue,
-  coalescing duplicates at enqueue time.
-- `WithExclusionGroup(name)` serializes **several** task names against each other
-  at run time — mutual exclusion across the group.
-
-The options compose. Exclusion is by group name and within a single process; it
-does not coordinate across processes sharing a database.
-
-## Unregistering tasks
-
-A task registered per entity, one per feed say, should go when its entity
-does. `Unregister` removes the handler and cancels the name's tasks as `Cancel`
-does: a **waiting** one is marked **canceled**, and a **running** one has its
-context canceled. It returns once the running ones have stopped, each with the
-status its return value gives; if its own context expires first, it returns an
-error and the tasks still running show **cancel_error** until they stop.
-
-```go
-tempo.Register(runner, "sync:"+feed.ID, syncFeed(feed))
-
-// when the feed is deleted
-if err := runner.Unregister(ctx, "sync:"+feed.ID); err != nil {
-    // a run was still stopping when ctx expired
-}
-```
-
-Until the name is registered again, a task enqueued under it is accepted, then
-fails, as for any name without a handler. So delete the schedules naming the
-task before you unregister it: a fire in between would add a failed task.
-
-`Unregister` waits for the name's running tasks, so a task of that name must
-not call it and wait: from one of them, start it in a new goroutine and return.
-
-## Scheduling
-
-`tempo/schedule` runs tasks on a cron timetable. Schedules are persisted and can
-be edited while the process runs; the scheduler owns the write path, so a change
-is stored and rescheduled in one call.
-
-```go
-sched, err := schedule.New(schedule.Cfg{
-    Store:    schedule.NewMemStore(), // or dbschedule.New(db)
-    Enqueuer: runner,                 // *tempo.QueueRunner satisfies this directly
-})
-if err != nil {
-    panic(err)
-}
-if err := sched.Start(ctx); err != nil {
-    panic(err)
-}
-
-// One task, two cadences, different parameters.
-nightly, err := sched.Create(ctx, schedule.Schedule{
-    TaskName: "scan",
-    Cron:     "0 2 * * *", // 5-field Unix or 6-field Quartz cron
-    Params:   []byte(`{"full":false}`),
-    Enabled:  true,
-})
-```
-
-Editing at runtime — each call persists **and** reschedules:
-
-```go
-sched.Update(ctx, updated)              // new cron or params
-sched.SetEnabled(ctx, nightly.ID, false) // pause without deleting
-sched.Delete(ctx, nightly.ID)
-sched.Trigger(ctx, nightly.ID)           // run now, with the stored params
-sched.Reload(ctx)                        // re-sync after a restore wrote to the store
-```
-
-Validate user input before storing it:
-
-```go
-if err := schedule.ValidateCron(userInput); err != nil {
-    // reject the request
-}
-```
-
-Schedules persist across restarts with `dbschedule`:
-
-```go
-store, err := dbschedule.New(db) // AutoMigrates the tempo_schedules table
-```
-
-A fire that cannot be enqueued, such as one that finds the queue full, is logged
-and dropped. A fire for a task name with no handler is enqueued, and the task
-fails. Fires missed while the process was down are not replayed,
-and a fire is enqueued even if the previous run is still going. Register the
-task with `tempo.WithMaxParallelism(1)` to serialize runs (a new fire still queues
-behind the current one), or `tempo.WithSingleton()` to skip the fire entirely
-while a previous run is still waiting or running.
-
-## Task logs
-
-Each task handler receives a `*slog.Logger` as its second argument. Anything it
-logs is routed to the runner's configured `LogSink`, tagged with the task id:
-
-```go
-r.RegisterRaw("resize", func(ctx context.Context, log *slog.Logger, params []byte) error {
-    log.Info("started", "bytes", len(params))
-    return nil
-})
-```
-
-Configure a sink on the runner with `RunnerCfg.LogSink` and the minimum level
-with `RunnerCfg.LogLevel`. With no sink, the logger discards. Lifecycle lines
-("task started/finished/canceled") are always recorded regardless of `LogLevel`.
-
-A sink implements `TaskLogSink` (write). It may also implement `TaskLogReader`
-(`Logs`) to read a task's lines back, and `TaskLogCleaner` (`RemoveTasks` /
-`RetainOnly`) so the runner can reap them. Two built-in sinks:
-
-- `tempo.MemTaskLogSink` — in-memory; implements all three.
-- `filelog.New(filelog.Config{Dir: "..."})` — one JSON-Lines file per task on
-  disk; implements all three.
-
-### Retention
-
-Logs live exactly as long as their task: when the runner trims a task from
-history it removes that task's logs, and at startup it sweeps orphaned logs for
-tasks it no longer knows about. There is no separate TTL.
-
-Because `filelog` files outlive the process, pair it with a
-`RecoverablePersistence` such as `dbqueue` if you want logs to survive restarts.
-With the default in-memory persistence, the startup sweep deletes every prior
-log file, since no task state remains to correlate them with.
-
-## Task progress
-
-Alongside the logger, each task handler receives a `tempo.Progress` reporter as
-its third argument. A long job publishes how far along it is; the reporter is a
-no-op when no `ProgressSink` is configured, so it is always safe to call:
-
-```go
-r.RegisterRaw("scan", func(ctx context.Context, log *slog.Logger, prog tempo.Progress, params []byte) error {
-    files := load(params)
-    prog.SetTotal(int64(len(files)))
-    for _, f := range files {
-        scan(f)
-        prog.SetStage("scanning " + f)
-        prog.Inc(1)
-    }
-    return nil
-})
-```
-
-Configure a sink with `RunnerCfg.ProgressSink`. A sink implements
-`TaskProgressSink` (write — an upsert by task id). It may also implement
-`TaskProgressReader` (`Progress`) to read the latest state back, and
-`TaskProgressCleaner` (`RemoveTasks` / `RetainOnly`) so the runner can reap it —
-the same optional-interface pattern the log sinks use. The built-in
-`tempo.MemTaskProgressSink` implements all three.
-
-Progress is last-value-wins state, not a log stream: `ProgressState` holds
-`Done` / `Total` / `Stage`, and `%` and ETA are computed from it, never stored:
-
-```go
-p, ok, _ := sink.Progress(ctx, id)
-if ok {
-    pct, _ := p.Percent()            // Done/Total in [0,1]
-    info, _ := runner.GetTask(id)
-    eta, _ := p.ETA(info.StartedAt)  // linear estimate
-    fmt.Printf("%.0f%% (%d/%d) — %s, ~%s left\n", pct*100, p.Done, p.Total, p.Stage, eta)
-}
-```
-
-Retention follows task existence, like logs: progress is reaped when its task is
-trimmed from history, and orphans are swept at startup. A job that updates in a
-tight loop should report every so often (e.g. every N iterations) rather than on
-every one, since `Set` runs synchronously on the worker.
-
-## How To
-
-### Handle Cancellation and Shutdown in Long-Running Tasks
-
-For long-running tasks, check the context to respond to `Cancel` and `ShutDown` and allow for clean termination:
-
-```go
-myTask := func(ctx context.Context) error {
-    ticker := time.NewTicker(1 * time.Second)
-    defer ticker.Stop()
-    
-    for {
-        select {
-        case <-ctx.Done():
-            fmt.Println("Cancel or shutdown received, cleaning up...")
-            cleanup()
-            return ctx.Err()
-            
-        case <-ticker.C:
-            // Do periodic work
-            doWork()
-        }
-    }
-}
-```
-
-The value a task returns decides its final status, whoever stopped it:
-`ctx.Err()` (or an error wrapping it) records **canceled**, `nil` records
-**complete**, any other error records **failed**, and a panic records
-**panicked**. `Cancel` returns once a running task has stopped, with that status
-already recorded; if its own context expires first, it returns an error and the
-task shows **cancel_error** until it stops.
-
-### Query Task Status
-
-```go
-// List all tasks
-tasks := runner.List()
-for _, task := range tasks {
-    fmt.Printf("Task %s: %s (queued: %v, started: %v)\n", 
-        task.Name, task.Status.Str(), task.QueuedAt, task.StartedAt)
-}
-
-// Get specific task
-task, err := runner.GetTask(taskID)
-if err != nil {
-    fmt.Printf("Task not found: %v\n", err)
-}
-```
+GNU LGPL v3, see [LICENSE](LICENSE).

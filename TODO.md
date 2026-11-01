@@ -1,6 +1,6 @@
-<!-- todo:guide — managed by todo; this block is rewritten on save. Docs: https://github.com/andresbott/todo
+<!-- todo:guide — managed by todo; this block is rewritten on save. Docs: https://github.com/candy-tools/todo
 This file is a todo list managed by "todo", a terminal TODO app:
-https://github.com/andresbott/todo
+https://github.com/candy-tools/todo
 
 todo watches this file and reloads it automatically when it changes on disk, so
 you — human or agent — can edit it directly in any editor. Keep to this format
@@ -18,6 +18,10 @@ Notes for editors:
 - Text above the first heading (this block included) is preserved on save.
 - todo rewrites the file into the canonical form above on every change, so any
   other free-form markdown placed between items is not kept.
+
+Prefer the CLI over editing by hand: it writes this file in the exact format
+above. `todo add`, `todo done|progress|defer|reopen`, `todo edit`, `todo rm`
+and `todo list --json` cover the common actions — run `todo --help`.
 -->
 
 Context: etna-finance and aether both carry a ~90%-identical `internal/taskrunner/`.
@@ -53,9 +57,10 @@ because todo only preserves free-form text there.)
   the entity is deleted, until restart. Decide what happens to its waiting
   tasks.
 - [>] allow a time zone per schedule
-  schedule.Cfg.Location is server-wide. Add an optional Schedule.TimeZone,
-  stored by dbschedule; quartz already takes a zone per trigger. Only
-  needed if ifmrip's triggers follow each job's zone.
+  Cfg.Location is the one zone for every rule; a server in another zone
+  than its jobs sets it once. Add an optional Schedule.TimeZone, stored by
+  dbschedule (quartz already takes a zone per trigger), only if one store
+  must hold rules in different zones.
 - [ ] refuse or default a zero Parallelism and QueueSize
   Parallelism 0 starts no worker, so nothing runs; QueueSize 0 makes every
   enqueue fail with ErrQueueFull.
@@ -84,3 +89,4 @@ because todo only preserves free-form text there.)
   - [ ] the scheduler's limits
     One process per store, a server-wide zone, missed fires not replayed,
     a coalesced fire is skipped.
+  - [ ] one Time zone configuraion for all jobs
